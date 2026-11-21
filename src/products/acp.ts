@@ -14,7 +14,7 @@ export const antigravity: ProductProfile = {
   label: "Antigravity",
   clientNames: ["antigravity-client"],
   doorbells: ["acp", "poll"],
-  verifiedVersions: ["1.5.13"],
+  verifiedVersions: ["1.5.13", "1.5.14"],
   acp: { command: "%LOCALAPPDATA%\\agy\\bin\\agy.exe", pathFallback: "agy.exe", args: ["acp", "--disable-telemetry"], mcp: "stdio",
     mcpName: "bridge_acp" }, // agy can keep the already-loaded global MCP server if names collide.
   detectVersion: (command) => command ? readVersion(command, ["--version"]) : Promise.resolve("unknown"),

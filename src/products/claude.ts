@@ -72,7 +72,7 @@ export const claude: ProductProfile = {
   label: "Claude 桌面版",
   clientNames: ["claude code", "claude-code"],
   doorbells: ["claude-socket", "poll"],
-  verifiedVersions: ["6.6395"],
+  verifiedVersions: ["6.6395", "6.28899"],
   detectVersion,
   setup,
   uninstall,
