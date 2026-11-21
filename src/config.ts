@@ -27,6 +27,8 @@ const AcpSchema = z.object({
   permissions: z.enum(["allow", "deny"]).default("deny"),
 });
 
+export const DEFAULT_REVIEW_INSTRUCTIONS = "首次审查要一次列全：先跑完验收标准和相关回归再下结论。每个阻塞问题写进 issues，能复现的附 repro（command、expect，需要时写 cwd），复现用的脚本放在 shared_dir。复审时先对 feedback.blocking 逐条写 rechecks，再提新问题，新问题要写 late_reason。不影响通过的建议写进 observations。";
+
 const DEFAULT_TASK_TEMPLATE = [
   {
     id: "implement",
@@ -41,7 +43,7 @@ const DEFAULT_TASK_TEMPLATE = [
     agent: "reviewer",
     gate: true,
     on_reject: "implement",
-    instructions: "对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。",
+    instructions: DEFAULT_REVIEW_INSTRUCTIONS,
   },
 ];
 
@@ -173,7 +175,7 @@ pipeline:
     agent: claude
     gate: true
     on_reject: implement
-    instructions: 对照验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+    instructions: ${DEFAULT_REVIEW_INSTRUCTIONS}
 task_template:
   - id: implement
     role: 实现
@@ -184,7 +186,7 @@ task_template:
     agent: reviewer
     gate: true
     on_reject: implement
-    instructions: 对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+    instructions: ${DEFAULT_REVIEW_INSTRUCTIONS}
 meetings:
   dir: doc/meetings
 doorbells:

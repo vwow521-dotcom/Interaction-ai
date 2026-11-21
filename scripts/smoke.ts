@@ -17,6 +17,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import YAML from "yaml";
+import { DEFAULT_CONFIG_YAML, DEFAULT_REVIEW_INSTRUCTIONS, loadConfig } from "../src/config.js";
 import { issueSummary } from "../src/engine/issues.js";
 import { smokeCli } from "./p2-cli-smoke.js";
 import { smokeAcp } from "./acp-smoke.js";
@@ -149,6 +151,8 @@ function check(cond: unknown, msg: string) {
   if (!cond) failed = true;
 }
 const write = (f: string, s: string) => fs.writeFileSync(path.join(proj, f), s);
+const sharedPath = (runId: number, taskId: number) => `.bridge/shared/${runId}/${taskId}/`;
+const hasDirectory = (f: string) => fs.statSync(path.join(proj, f), { throwIfNoEntry: false })?.isDirectory() ?? false;
 const task = (r: any) => r.mails?.find((m: any) => m.kind === "task" && !m.void)?.task;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function waitState(predicate: (snapshot: any) => boolean, message: string) {
@@ -173,6 +177,12 @@ function runHook(stdin: object, env: Record<string, string>): Promise<{ out: str
 }
 
 try {
+  const builtIn = YAML.parse(DEFAULT_CONFIG_YAML);
+  const example = YAML.parse(fs.readFileSync(path.join(ROOT, "bridge.config.example.yaml"), "utf8"));
+  const explicitReviewStages = [builtIn.pipeline, builtIn.task_template, example.pipeline, example.task_template, loadConfig(ROOT).pipeline];
+  check([...explicitReviewStages, loadConfig(proj).task_template].every((stages) =>
+    stages.find((stage: { id: string }) => stage.id === "review")?.instructions === DEFAULT_REVIEW_INSTRUCTIONS),
+    "built-in, fallback, example and repository review instructions agree");
   await startDaemon();
 
   // Prompts and implicit join go through the stdio proxy, where the native client name reaches the daemon.
@@ -224,6 +234,13 @@ try {
   check((await api("/api/runs", { goal: "again" })).status === 409, "second start rejected while open");
   let t = task(await claudeWait);
   check(t?.stage?.id === "plan" && t.stage.needs_approval, "blocked wait_for_mail woken with plan task");
+  const planning = await state();
+  const pipelineShared = sharedPath(planning.run.id, planning.live.task_id);
+  check(t.shared_dir === pipelineShared && !t.shared_dir_error && hasDirectory(pipelineShared) && t.instructions.includes("shared_dir"),
+    "first pipeline task mail creates a project-relative directory with numeric run and task IDs");
+  const pipelineScript = `${pipelineShared}repro.mjs`;
+  const scriptContent = "console.log('shared')\n";
+  write(pipelineScript, scriptContent);
   write("DESIGN.md", "# hello\nprint hello\n");
   await call(claude, "post_note", { agent_id: "claude", topic: "约定", text: "用 node 写" });
   let sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "写了设计", files_changed: ["DESIGN.md"], notes_for_next: "按 DESIGN.md 实现" });
@@ -245,6 +262,8 @@ try {
     t?.stage.id === "implement" && t.feedback?.kind === "approval_note" && t.feedback.user_requirements[0].includes("感叹号") && t.input_handoff?.summary === "写了设计",
     "codex woken with implement task + structured approval note",
   );
+  check(t.shared_dir === pipelineShared && fs.readFileSync(path.join(proj, pipelineScript), "utf8") === scriptContent,
+    "implementation receives the same directory and script created in planning");
 
   const asked = await call(codex, "ask_human", { agent_id: "codex", question: "用 console.log 吗？" });
   check(asked.status === "submitted", "ask_human returns immediately");
@@ -327,6 +346,9 @@ try {
   let cm = await call(claude, "fetch_inbox", { agent_id: "claude" });
   t = task(cm);
   check(t?.stage.id === "review" && cm.mails.some((m: any) => m.id === "dup-1"), "claude gets review task and codex's note");
+  check(t.shared_dir === pipelineShared && fs.readFileSync(path.join(proj, pipelineScript), "utf8") === scriptContent &&
+    t.instructions.includes(DEFAULT_REVIEW_INSTRUCTIONS) && t.stage.instructions === null,
+    "review shares the implementation directory and gets updated guidance when no stage rule is configured");
   const reviewing = activity(await state(), "claude");
   check(reviewing?.state === "reviewing" && reviewing.evidence, "Office recognizes a fetched review stage");
   const ctx = await call(claude, "get_context", { agent_id: "claude", last_n: 1 });
@@ -362,6 +384,7 @@ try {
     sh("log", "-1", "--format=%b").includes(s.handoffs.at(-1).data.review_comments[0]), "structured issue has a compatible review comment and Git message");
   await api(`/api/attempts/${s.live.id}/decide`, { action: "reject", note: "按审查意见改" });
   t = task(await call(codex, "wait_for_mail", { agent_id: "codex" }));
+  check(t.shared_dir === pipelineShared && hasDirectory(pipelineShared), "rework retains the pipeline task directory");
   check(
     t?.stage.id === "implement" && t.feedback.kind === "rework" && t.feedback.user_requirements[0] === "按审查意见改" &&
       t.feedback.blocking[0].id === "T1-B1" && t.feedback.blocking[0].problem === firstIssue.problem &&
@@ -434,6 +457,8 @@ try {
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
   check(commits.length === 7 && commits.some((c) => c.includes("审查通过")), `7 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
+  check(fs.readFileSync(path.join(proj, pipelineScript), "utf8") === scriptContent && sh("check-ignore", "--", pipelineScript) === pipelineScript &&
+    sh("log", "--format=%H", "--", pipelineScript) === "", "shared script survives task completion and stays out of Git even for unscoped handoffs");
   const [panel, mainAsset, cssAsset, oldPanel, oldScript, oldStyle] = await Promise.all(
     ["/", "/panel/js/main.js", "/panel/app.css", "/v1", "/panel/v1/room.js", "/panel/v1/room.css"].map((p) => fetch(BASE + p)),
   );
@@ -463,8 +488,15 @@ try {
     model.receiptLabel({ status: "rung", waitingForTurn: true })[0] === "排队中，等它这一轮结束", "panel uses the busy delivery hint and receipt label");
 
   await api("/api/runs", { goal: "第二个任务" });
+  s = await state();
+  const resumedShared = sharedPath(s.run.id, s.live.task_id);
+  const blockingFile = path.join(proj, resumedShared.slice(0, -1));
+  fs.mkdirSync(path.dirname(blockingFile), { recursive: true });
+  fs.writeFileSync(blockingFile, "fixture: directory creation must fail");
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
-  check(t?.stage.id === "plan", "second run: claude takes plan");
+  check(t?.stage.id === "plan" && t.shared_dir === resumedShared && t.shared_dir_error && t.instructions.includes("shared_dir_error") &&
+    (await state()).live.status === "in_progress", "a blocked shared path reports the error and still delivers the task");
+  fs.unlinkSync(blockingFile);
   await stopDaemon();
   await startDaemon();
   s = await state();
@@ -473,7 +505,8 @@ try {
   claude = await connect("claude-again", claudeTransport);
   await call(claude, "join", { agent_id: "claude" });
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
-  check(t?.resumed === true && t.stage.id === "plan", "in-progress stage re-sent as mail after restart + rejoin");
+  check(t?.resumed === true && t.stage.id === "plan" && t.shared_dir === resumedShared && !t.shared_dir_error && hasDirectory(resumedShared),
+    "restart and rejoin re-send the in-progress task and retry its shared directory");
   await claudeTransport.terminateSession();
   await claude.close();
   claude = await connect("claude-new-session");
@@ -599,12 +632,20 @@ try {
   const tk = (k: string) => s.tasks.find((x: any) => x.key === k);
   check(tk("T1").status === "active" && tk("T2").status === "active" && tk("T4").status === "active" && tk("T3").waiting === "等 T1、T2", "T1/T2/T4 start, T3 waits on its dependencies");
   check(s.leases.filter((l: any) => !l.released_at).length === 3 && s.leases.some((l: any) => l.glob === "b/**"), "task paths leased (b/ → b/**)");
+  const parallelShared1 = sharedPath(s.run.id, tk("T1").id);
+  const parallelShared2 = sharedPath(s.run.id, tk("T2").id);
+  check(!hasDirectory(parallelShared1) && !hasDirectory(parallelShared2), "task directories are created on fetch");
 
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(t?.task?.key === "T1" && t.stage.id === "implement" && t.task.description.includes("注意中文注释") && t.meeting_minutes === appr.json.doc_path, "claude gets T1 with the approval note and minutes path");
+  check(t.shared_dir === parallelShared1 && hasDirectory(parallelShared1) && !hasDirectory(parallelShared2), "fetching T1 only creates the T1 directory");
+  const parallelFixture = `${parallelShared1}sample.txt`;
+  write(parallelFixture, "T1 的共享样例\n");
   let ci = await call(codex, "fetch_inbox", { agent_id: "codex" });
   const codexTasks = ci.mails.filter((m: any) => m.kind === "task" && !m.void);
   check(codexTasks.length === 1 && codexTasks[0].task.task.key === "T2", "codex gets only one task at a time (T2, T4 held back)");
+  check(codexTasks[0].task.shared_dir === parallelShared2 && hasDirectory(parallelShared2) && parallelShared1 !== parallelShared2 &&
+    !fs.existsSync(path.join(proj, parallelShared2, "sample.txt")), "parallel tasks use independent shared directories");
   const busyDoorbell = fetch(BASE + "/api/doorbell/wait?agent=codex&kind=codex-hook&timeout=10").then((r) => r.json());
   for (let i = 0; i < 30 && !(await state()).agents.find((a: any) => a.id === "codex").doorbellArmed; i++) await sleep(100);
   const queuedDuringT2 = await api("/api/mail", { to: "codex", text: "结束 T2 后再看" });
@@ -682,7 +723,10 @@ try {
   await call(codex, "submit_handoff", { agent_id: "codex", summary: "d 完成", files_changed: ["d/one.txt"] });
   t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   check(t?.task?.key === "T1" && t.stage.id === "review" && t.input_handoff?.summary === "a 完成", "codex then gets the T1 review");
-  check(t.stage.instructions.includes("verdict") && !t.instructions.includes("verdict 填 approve") && t.instructions.includes("task.paths") &&
+  check(t.shared_dir === parallelShared1 && fs.readFileSync(path.join(proj, parallelFixture), "utf8") === "T1 的共享样例\n" &&
+    sh("ls-files", "--", parallelFixture) === "", "meeting review sees its implementer's shared sample outside Git");
+  check(t.stage.instructions === DEFAULT_REVIEW_INSTRUCTIONS && !t.instructions.includes(DEFAULT_REVIEW_INSTRUCTIONS) &&
+    t.instructions.includes("verdict 填 approve") && t.instructions.includes("task.paths") &&
     !t.instructions.includes(t.task.paths[0]) && t.instructions.includes("meeting_minutes") && !t.instructions.includes(t.meeting_minutes),
     "task instructions point at task.paths, meeting_minutes and the stage's own review rule instead of copying them");
   write("a/one.txt", "a (local change left in the review scope)\n");

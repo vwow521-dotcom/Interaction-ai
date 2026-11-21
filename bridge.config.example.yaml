@@ -39,7 +39,7 @@ pipeline:
     agent: claude
     gate: true
     on_reject: implement
-    instructions: 对照验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+    instructions: 首次审查要一次列全：先跑完验收标准和相关回归再下结论。每个阻塞问题写进 issues，能复现的附 repro（command、expect，需要时写 cwd），复现用的脚本放在 shared_dir。复审时先对 feedback.blocking 逐条写 rechecks，再提新问题，新问题要写 late_reason。不影响通过的建议写进 observations。
 # task_template: 会议定稿后，每个任务按这组阶段走。agent 写 owner（任务负责人）、reviewer（任务审查人）或固定的身份。
 # 没有审查人的任务会跳过 agent 为 reviewer 的阶段。
 task_template:
@@ -52,7 +52,7 @@ task_template:
     agent: reviewer
     gate: true
     on_reject: implement
-    instructions: 对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+    instructions: 首次审查要一次列全：先跑完验收标准和相关回归再下结论。每个阻塞问题写进 issues，能复现的附 repro（command、expect，需要时写 cwd），复现用的脚本放在 shared_dir。复审时先对 feedback.blocking 逐条写 rechecks，再提新问题，新问题要写 late_reason。不影响通过的建议写进 observations。
 meetings:
   dir: doc/meetings           # 会议纪要写到这里，定稿时自动提交
   # facilitator: claude       # 负责写定稿和任务清单的成员，默认 agents 里的第一个

@@ -1,4 +1,7 @@
 // Run/task DAG, attempts, and the code committed by each handoff.
+import fs from "node:fs";
+import path from "node:path";
+import { DEFAULT_REVIEW_INSTRUCTIONS } from "../config.js";
 import { changedFiles, commitAll, commitPaths, globMatch, normGlob, snapshotChangedFiles } from "../git.js";
 import type { Attempt, Feedback, HandoffData, HandoffSubmission, Issue, Lease, Mail, Run, Task, TaskStage } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
@@ -78,8 +81,7 @@ export class Scheduler {
     return { key: t.key, title: t.title, description: t.description, owner: t.owner, reviewer: t.reviewer, depends_on: t.depends_on, paths: t.paths, status: t.status };
   }
 
-  private turnPayload(run: Run, a: Attempt, resumed: boolean): Result {
-    const task = this.ctx.store.task(a.task_id)!;
+  private turnPayload(run: Run, task: Task, a: Attempt, resumed: boolean, shared: { shared_dir: string; shared_dir_error?: string }): Result {
     const stage = this.stageOf(task, a.stage_id);
     const all = this.ctx.store.tasks(run.id);
     const multi = all.length > 1;
@@ -100,6 +102,9 @@ export class Scheduler {
     const meeting = run.meeting_id ? this.ctx.store.meeting(run.meeting_id) : undefined;
     const parallel = all.filter((t) => t.id !== task.id && t.status === "active").map((t) => `${t.key}（${t.owner}）：${t.paths.join("、") || "未声明范围"}`);
     const showTask = multi || !!meeting;
+    const reviewGuide = stage.on_reject && !stage.instructions?.includes("verdict")
+      ? "审查结论的 verdict 填 approve 或 reject。" + (stage.instructions?.includes(DEFAULT_REVIEW_INSTRUCTIONS) ? "" : DEFAULT_REVIEW_INSTRUCTIONS)
+      : "";
     const fromRejected = fb?.kind === "rework" && input?.stage_id === fb.from_stage;
     let inputData = input?.data;
     let feedback = fb;
@@ -122,6 +127,7 @@ export class Scheduler {
       task: showTask ? this.taskView(task) : undefined,
       stage: { id: stage.id, role: stage.role, instructions: stage.instructions ?? null, needs_approval: stage.gate, owns: stage.owns ?? [] },
       feedback,
+      ...shared,
       input_handoff: input && { from: `${input.agent}/${input.stage_id}`, commit: input.commit_sha, ...inputData },
       earlier_handoffs: handoffs.slice(0, -1).map((h) => `${h.agent}/${h.stage_id}：${h.data.summary}`),
       dependencies: deps.map((t) => {
@@ -140,6 +146,8 @@ export class Scheduler {
         (resumed ? "这是你之前领到但还没提交的阶段，请继续完成。" : "") +
         `你现在负责${multi ? `任务「${task.key}：${task.title}」的` : ""}阶段「${stage.id}：${stage.role}」。完成后调用 submit_handoff，并在 files_changed 里列全你改动的文件。` +
         (meeting?.doc_path ? "会议纪要见 meeting_minutes，有疑问先读它。" : "") +
+        "shared_dir 是相对项目根的路径。临时脚本、样例和复现文件放在这里，实现方和审查方共用，桥提交时会忽略该目录。" +
+        (shared.shared_dir_error ? "本次创建共享目录失败，原因见 shared_dir_error。" : "") +
         (task.paths.length ? (showTask ? "task.paths 是本任务的文件范围，已为它租下。" : `本任务的文件范围（已为它租下）：${task.paths.join("、")}。`) : "") +
         (fromRejected ? "被打回的那份交接里的审查意见已整理进 feedback，input_handoff 里不再重复。" : "") +
         (parallel.length
@@ -147,7 +155,7 @@ export class Scheduler {
           : "") +
         (fb ? fbGuide[fb.kind] : "") +
         (owned.length ? `文件分工（${owned.join("；")}）：改动其他阶段负责的文件时，请在交接单 notes_for_next 里说明原因。` : "") +
-        (stage.on_reject && !stage.instructions?.includes("verdict") ? "这是审查阶段：verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。" : ""),
+        reviewGuide,
     };
   }
 
@@ -156,12 +164,19 @@ export class Scheduler {
     const a = m.attempt_id ? this.ctx.store.attempt(m.attempt_id) : undefined;
     const run = a && this.ctx.store.run(a.run_id);
     if (!a || !run || !["ready", "in_progress"].includes(a.status) || !["active", "awaiting_approval"].includes(run.status)) return null;
+    const task = this.ctx.store.task(a.task_id)!;
+    const shared_dir = `.bridge/shared/${run.id}/${task.id}/`;
+    let shared_dir_error: string | undefined;
+    try {
+      fs.mkdirSync(path.join(this.ctx.cfg.projectDir, shared_dir), { recursive: true });
+    } catch (error) {
+      shared_dir_error = error instanceof Error ? error.message : String(error);
+    }
     const resumed = a.status === "in_progress";
     if (!resumed) this.ctx.store.updateAttempt(a.id, { status: "in_progress", started_at: new Date().toISOString() });
-    const task = this.ctx.store.task(a.task_id)!;
     this.ctx.log("task_fetched", { agent, run: run.id, task: task.key, stage: a.stage_id, attempt: a.id, resumed, latencyMs: Date.now() - Date.parse(m.created_at) });
     this.ctx.event(run.id, agent, "turn", `${agent} 开始「${this.taskLabel(task)}${a.stage_id}」${resumed ? "（继续）" : ""}`);
-    return this.turnPayload(run, this.ctx.store.attempt(a.id)!, resumed);
+    return this.turnPayload(run, task, a, resumed, { shared_dir, shared_dir_error });
   }
 
   /** After a (re)join: re-mail an in-progress task that has no unfetched mail, then deliver the next ready one. */
