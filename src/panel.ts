@@ -243,7 +243,8 @@ function render(s) {
       let fb = null;
       try { fb = a.feedback ? JSON.parse(a.feedback) : null; } catch (e) { fb = { user_requirements: [a.feedback], blocking: [], observations: [] }; }
       const fbHtml = fb && (fb.user_requirements.length || fb.blocking.length)
-        ? '<div style="margin-bottom:8px"><div class=mute>本轮依据（来自「' + esc(fb.from_stage || "") + '」的打回）</div>' + list(fb.user_requirements.concat(fb.blocking)) + "</div>" : "";
+        ? '<div style="margin-bottom:8px"><div class=mute>本轮依据（来自「' + esc(fb.from_stage || "") + '」的打回）</div>' + list(fb.user_requirements.concat(
+          fb.blocking.map((issue) => typeof issue === "string" ? issue : [issue.id, issue.problem].filter(Boolean).join(" ")))) + "</div>" : "";
       h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + (multi ? esc(task.key) + " " + esc(task.title) + " / " : "") + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + fbHtml + (ho ? handoffBody(ho) : "") +
         '<textarea id="note-' + a.id + '" data-keep rows="2" style="margin-top:10px" placeholder="备注（可选）：批准时会带给下一阶段，打回时作为修改意见"></textarea>' +
         '<div class="row" style="margin-top:8px">' + (rejectFirst ? bReject + bApprove : bApprove + bReject) + "</div></div>";

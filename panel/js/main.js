@@ -319,12 +319,12 @@ async function copyWake(button) {
     showCopyFallback(box, fallback, { focus: active === document.body || box.contains(active) });
   }
 }
-async function copyText(button, value) {
-  const status = $("[data-link-status]", button.closest(".minutes-file, .choices"));
+async function copyText(button, value, fallback = value) {
+  const status = $("[data-link-status]", button.closest(".minutes-file, .choices, .issue-repro"));
   try {
     await navigator.clipboard.writeText(value);
     status.textContent = "已复制";
-  } catch { status.textContent = value; }
+  } catch { status.textContent = fallback; }
 }
 
 const local = {
@@ -350,6 +350,10 @@ const local = {
   copyWake,
   copyLink(button) { void copyText(button, location.href); },
   copyText(button) { void copyText(button, button.dataset.text); },
+  copyRepro(button) {
+    const command = $("pre code", button.closest(".issue-repro")).textContent;
+    void copyText(button, command, "剪贴板不可用，请选中命令复制");
+  },
   libFilter(button) { libFilter = button.dataset.filter; if (state.current) drawLibrary(state.current); },
   homeFilter(button) { homeFilter = button.dataset.filter; if (state.current) renderHome(state.current, homeFilter); },
   moreFolders,

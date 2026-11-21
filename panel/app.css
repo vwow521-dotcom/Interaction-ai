@@ -403,6 +403,11 @@ button:disabled { opacity: .45; cursor: default; }
 .card-link { margin-top: 5px; font-size: 12px; }
 .detail-body { padding: 8px 0; display: grid; gap: 6px; overflow-wrap: anywhere; }
 .detail-body ul, ul.detail-body { list-style: disc; padding-left: 18px; }
+.detail-body .issue-list { display: grid; gap: 10px; list-style: none; padding: 0; }
+.issue-item { display: grid; gap: 4px; border-left: 2px solid var(--line); padding-left: 10px; }
+.issue-repro { display: grid; gap: 4px; }
+.issue-repro pre { margin: 2px 0; padding: 8px; border-radius: 6px; background: var(--panel-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-stats { font-size: 13px; }
 summary { cursor: pointer; color: var(--ink-2); }
 #connection-error { position: fixed; left: 8px; bottom: 84px; z-index: 11; max-width: calc(100vw - 16px);
   border-radius: 8px; background: var(--panel); color: var(--bad); padding: 8px 12px; box-shadow: var(--shadow); }

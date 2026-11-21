@@ -206,7 +206,8 @@
     let gate = "";
     if (it.gate) {
       const g = it.gate, fb = g.feedback;
-      const basis = fb && (fb.user_requirements.length || fb.blocking.length) ? '<div class="details"><div class="h">本轮依据（来自「' + esc(fb.from_stage) + "」的打回）</div>" + list(fb.user_requirements.concat(fb.blocking)) + "</div>" : "";
+      const basis = fb && (fb.user_requirements.length || fb.blocking.length) ? '<div class="details"><div class="h">本轮依据（来自「' + esc(fb.from_stage) + "」的打回）</div>" + list(fb.user_requirements.concat(
+        fb.blocking.map((issue) => typeof issue === "string" ? issue : [issue.id, issue.problem].filter(Boolean).join(" ")))) + "</div>" : "";
       const approve = '<button type="button" class="btn small ' + (g.reject_first ? "" : "primary") + '" data-act="decide" data-id="' + g.attempt_id + '" data-v="approve">' + (g.reject_first ? "仍然通过" : "批准") + "</button>";
       const reject = '<button type="button" class="btn small ' + (g.reject_first ? "primary" : "danger") + '" data-act="decide" data-id="' + g.attempt_id + '" data-v="reject">' + (g.reject_first ? "确认打回" : "打回") + "到「" + esc(g.reject_to) + "」</button>";
       gate = basis + noteBox("note-" + g.attempt_id, "备注（可选）：批准时带给后续阶段，打回时作为修改要求") + '<div class="actions">' + (g.reject_first ? reject + approve : approve + reject) + "</div>";

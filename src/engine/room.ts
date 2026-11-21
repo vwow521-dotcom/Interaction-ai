@@ -5,6 +5,7 @@ import type { BridgeEvent, Handoff, Meeting, MeetingTurn, Question } from "../st
 import type { Chat } from "./chat.js";
 import type { EngineContext } from "./context.js";
 import type { DriftNotice } from "./diagnostics.js";
+import { issueSummary } from "./issues.js";
 import type { Meetings } from "./meetings.js";
 import type { Postman } from "./postman.js";
 import type { Scheduler } from "./scheduler.js";
@@ -196,6 +197,7 @@ export class Room {
       stage_role: stage?.role ?? h.stage_id,
       task: task && multi ? { key: task.key, title: task.title } : null,
       data: h.data,
+      issue_summary: issueSummary(h.data),
       commit_sha: h.commit_sha,
       commit_error: h.commit_error,
       scope_notes: h.scope_notes,

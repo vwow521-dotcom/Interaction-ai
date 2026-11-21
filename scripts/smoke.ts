@@ -436,6 +436,11 @@ try {
     secondReview.issues[0].id === "T1-B5" && secondReview.rechecks[0].issue.repro.expect === firstIssue.repro.expect &&
     secondReview.review_comments.join("|") === "[未修复] T1-B2：缺少空输入测试|T1-B5：缺少退出码测试" &&
     sub.scope_notes.some((n: string) => n.includes("T1-B5") && n.includes("late_reason")), "second rejection numbers legacy-format input, preserves snapshots and warns about missing late_reason");
+  const reviewId = s.handoffs.at(-1).id;
+  const reviewInTimeline = s.timeline.find((item: any) => item.type === "handoff" && item.id === reviewId);
+  const reviewInFolder = (await api(`/api/folders/r${s.run.id}`)).json.handoffs.find((item: any) => item.id === reviewId);
+  check([reviewInTimeline, reviewInFolder].every((item) => JSON.stringify(item?.issue_summary) === JSON.stringify(summary)),
+    "timeline and folder review cards expose the same issue summary including late reports");
   await api(`/api/attempts/${s.live.id}/decide`, { action: "reject", note: "" });
   t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   check(t.feedback.blocking.map((issue: any) => issue.id).join(",") === "T1-B2,T1-B5" &&
