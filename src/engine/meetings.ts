@@ -42,15 +42,25 @@ export class Meetings {
   private meetingPayload(m: Meeting, agent: string): Result {
     const turns = this.ctx.store.meetingTurns(m.id);
     const rounds: Result[] = [];
+    // The agent's own last turn is already in its conversation, unless that conversation started after the turn
+    // (a new session, a takeover, a rejoin, a restarted background member): then it gets the full text like everyone else's.
+    const since = this.presence.conversationSince(agent);
+    const remembers = (t: { agent: string; created_at: string }) => t.agent === agent && since !== undefined && since <= Date.parse(t.created_at);
+    let ownSummarized = false;
     for (let r = 1; r < m.round; r++) {
       const ts = turns.filter((t) => t.round === r);
       if (!ts.length) continue;
       rounds.push({
         round: r,
         kind: ts[0].kind,
-        turns: ts.map((t) => r === m.round - 1
-          ? { agent: t.agent, content: t.content, tasks: t.tasks ?? undefined, decisions: t.decisions.length ? t.decisions : undefined }
-          : { agent: t.agent, summary: summarizeTurn(t.content) }),
+        turns: ts.map((t) => {
+          if (r !== m.round - 1) return { agent: t.agent, summary: summarizeTurn(t.content) };
+          if (remembers(t)) {
+            ownSummarized = true;
+            return { agent: t.agent, yours: true, summary: summarizeTurn(t.content) };
+          }
+          return { agent: t.agent, content: t.content, tasks: t.tasks ?? undefined, decisions: t.decisions.length ? t.decisions : undefined };
+        }),
       });
     }
     const taskSpec =
@@ -87,6 +97,7 @@ export class Meetings {
       instructions:
         guide[m.round_kind] +
         (m.round_note ? "用户对本轮的要求见 human_note，必须回应。" : "") +
+        (ownSummarized ? "previous_rounds 里标 yours 的是你自己上一轮的发言，只给摘要，全文就在你这段对话里。" : "") +
         (planning ? taskSpec : "") +
         `写完后调用 submit_meeting_turn(agent_id, meeting_id=${m.id}, content${m.round_kind === "final" ? ", decisions, tasks" : m.round_kind === "proposal" ? ", tasks?" : ""})。`,
     };

@@ -389,3 +389,13 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
   - Windows 上 `acp_spawn` 事件在代理 PID 报上来之前发出，显示「PID 未知」；成员详情随后显示真实 PID。
   - DeepSeek Harness 的 MCP 插件断线后不会自动重连（见上文「复用与补投」）。
 
+
+## 24. 信件去重（2026-11-21）
+
+在 `.bridge/bridge.db` 的副本上把历史上所有信件重放了一遍。任务信每封约 2.2k 到 5k 字；会议互评轮最大，会议 #3 达到 22k 字；聊天信约 1.5k 字。7 次返工里，`feedback` 和 `input_handoff` 合计约 16.5k 字，其中约 5.3k 字（32%）是同一份审查意见发了两遍。改动只发生在生成信件的那一层，数据库、面板和 `get_context` 都不变。
+
+- **返工信**。被打回的那份交接里的 `review_comments` 和 `observations` 已经整理进 `feedback.blocking` 和 `feedback.observations`，`input_handoff` 里不再带这两项，`summary`、`done`、`verdict` 和提交 SHA 照常保留。
+- **复审信**。带过来的反馈（`carried`）保留 `user_requirements` 和 `blocking`，不再带上一次审查的非阻塞观察。
+- **会议信**。上一轮的发言里，收信人自己那条只给一句摘要，并标 `yours: true`。如果成员在写完那条发言之后才绑定或 join（新对话、接管、后台成员重启），说明当前对话可能没见过它，就照常发全文。是否 join 过用 `presence.joinedAt` 判断，因为新开的 Codex 对话可能沿用同一个 MCP 会话。
+- **说明文字**。说明里不再抄写已有的字段，改成指向 `task.paths`、`meeting_minutes`。阶段自己的 `instructions` 已经写了审查规则时，不再追加通用的那句审查规则。
+- **没有改的**。每封信都带任务描述，因为 ACP 成员和新对话里没有上下文。互评轮照常给其他人上一轮的全文。更大的开销其实来自跨多个运行一直不关的长对话，以及反复读代码、跑 smoke，这些不在信件里。

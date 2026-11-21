@@ -11,6 +11,7 @@ interface AgentPresence {
   sessionId?: string; // the one MCP session allowed to act as this agent
   canRecover?: boolean; // set only when the bound MCP session closes
   boundAt?: number;
+  joinedAt?: number; // last successful join, even from the same MCP session (a new Codex thread may share one)
   lastSeenAt?: number; // last tool call from the bound session
   // Counts the same activity as lastSeenAt. A doorbell check compares counts, not timestamps: the call that
   // caused a ring and a new call after it can share a millisecond.
@@ -111,6 +112,13 @@ export class Presence {
     return "idle";
   }
 
+  /** When the agent's current conversation may have started: its binding or its last join, whichever is later. */
+  conversationSince(agent: string): number | undefined {
+    const p = this.agents.get(agent);
+    if (!p?.boundAt) return undefined;
+    return Math.max(p.boundAt, p.joinedAt ?? 0);
+  }
+
   bindingError(agent: string, sessionId: string | undefined): string | null {
     const p = this.agents.get(agent);
     if (!p) return `未知 agent_id，可选：${this.agentIds().join(", ")}`;
@@ -198,6 +206,7 @@ export class Presence {
       this.ctx.log("join_takeover", { agent, from: p.sessionId, to: sessionId });
     }
     this.bind(p, sessionId);
+    p.joinedAt = Date.now();
     this.applyDoorbellHint(p, doorbellHint ?? (sessionId ? this.sessionDoorbell.get(sessionId) : undefined));
     if (client) p.client = { ...client, reportedAt: new Date().toISOString() };
     const bell = this.doorbells.get(this.doorbellKind(agent, sessionId));

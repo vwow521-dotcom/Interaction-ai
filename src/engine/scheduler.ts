@@ -94,13 +94,19 @@ export class Scheduler {
     const deps = all.filter((t) => task.depends_on.includes(t.key));
     const meeting = run.meeting_id ? this.ctx.store.meeting(run.meeting_id) : undefined;
     const parallel = all.filter((t) => t.id !== task.id && t.status === "active").map((t) => `${t.key}（${t.owner}）：${t.paths.join("、") || "未声明范围"}`);
+    const showTask = multi || !!meeting;
+    // A rework's feedback already holds the rejected handoff's review_comments and observations; don't send them twice.
+    const fromRejected = fb?.kind === "rework" && input?.stage_id === fb.from_stage;
+    const inputData = input && fromRejected ? (({ review_comments: _c, observations: _o, ...rest }) => rest)(input.data) : input?.data;
+    // A re-review needs this round's requirements and blocking issues; the previous review's non-blocking notes are its own.
+    const feedback = fb?.kind === "carried" ? { ...fb, observations: [] } : fb;
     return {
       resumed,
       run: { id: run.id, goal: run.goal },
-      task: multi || meeting ? this.taskView(task) : undefined,
+      task: showTask ? this.taskView(task) : undefined,
       stage: { id: stage.id, role: stage.role, instructions: stage.instructions ?? null, needs_approval: stage.gate, owns: stage.owns ?? [] },
-      feedback: fb,
-      input_handoff: input && { from: `${input.agent}/${input.stage_id}`, commit: input.commit_sha, ...input.data },
+      feedback,
+      input_handoff: input && { from: `${input.agent}/${input.stage_id}`, commit: input.commit_sha, ...inputData },
       earlier_handoffs: handoffs.slice(0, -1).map((h) => `${h.agent}/${h.stage_id}：${h.data.summary}`),
       dependencies: deps.map((t) => {
         const current = t.status === "active" ? this.ctx.store.taskLiveAttempt(t.id) : undefined;
@@ -117,14 +123,15 @@ export class Scheduler {
       instructions:
         (resumed ? "这是你之前领到但还没提交的阶段，请继续完成。" : "") +
         `你现在负责${multi ? `任务「${task.key}：${task.title}」的` : ""}阶段「${stage.id}：${stage.role}」。完成后调用 submit_handoff，并在 files_changed 里列全你改动的文件。` +
-        (meeting?.doc_path ? `会议纪要在 ${meeting.doc_path}，有疑问先读它。` : "") +
-        (task.paths.length ? `本任务的文件范围（已为它租下）：${task.paths.join("、")}。` : "") +
+        (meeting?.doc_path ? "会议纪要见 meeting_minutes，有疑问先读它。" : "") +
+        (task.paths.length ? (showTask ? "task.paths 是本任务的文件范围，已为它租下。" : `本任务的文件范围（已为它租下）：${task.paths.join("、")}。`) : "") +
+        (fromRejected ? "被打回的那份交接里的审查意见已整理进 feedback，input_handoff 里不再重复。" : "") +
         (parallel.length
           ? "有其他任务在并行：只改本任务范围内的文件；确实要改范围外的文件，先调用 reserve_paths。提交时桥只提交本任务范围内的文件和你在 files_changed 里声明的文件。"
           : "") +
         (fb ? fbGuide[fb.kind] : "") +
         (owned.length ? `文件分工（${owned.join("；")}）：改动其他阶段负责的文件时，请在交接单 notes_for_next 里说明原因。` : "") +
-        (stage.on_reject ? "这是审查阶段：verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。" : ""),
+        (stage.on_reject && !stage.instructions?.includes("verdict") ? "这是审查阶段：verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。" : ""),
     };
   }
 

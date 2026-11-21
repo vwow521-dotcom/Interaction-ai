@@ -322,6 +322,9 @@ try {
       t.feedback.blocking[0] === "输出没有感叹号" && t.feedback.observations[0] === "变量名可以更清楚",
     "rework feedback split into user requirements / blocking / observations",
   );
+  check(t.input_handoff?.from === "claude/review" && t.input_handoff.summary === "缺感叹号" && t.input_handoff.verdict === "reject" &&
+    !("review_comments" in t.input_handoff) && !("observations" in t.input_handoff) && t.instructions.includes("不再重复"),
+    "rework input_handoff drops the review comments already in feedback");
   write("hello.js", "console.log('hello!')\n");
   write("DESIGN.md", "# hello\nprint hello!\n");
   await call(codex, "submit_handoff", { agent_id: "codex", summary: "加了感叹号", files_changed: ["hello.js", "DESIGN.md"] });
@@ -329,6 +332,9 @@ try {
   check(s.handoffs.at(-1).scope_notes.some((n: string) => n.includes("plan") && n.includes("DESIGN.md")), "touching another stage's file flagged");
   t = task(await call(claude, "wait_for_mail", { agent_id: "claude" }));
   check(t?.stage.id === "review" && t.feedback?.kind === "carried" && t.feedback.user_requirements[0] === "按审查意见改", "re-review carries this round's user requirements");
+  check(t.feedback.blocking[0] === "输出没有感叹号" && t.feedback.observations.length === 0 && t.input_handoff?.summary === "加了感叹号" &&
+    t.stage.instructions === null && (t.instructions.match(/verdict 填 approve/g) ?? []).length === 1,
+    "re-review keeps blocking issues and drops the old review's observations; a stage without its own rule gets the generic one once");
   await call(claude, "submit_handoff", { agent_id: "claude", summary: "通过", verdict: "approve" });
   s = await state();
   await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "" });
@@ -433,11 +439,16 @@ try {
     "critique round carries every proposal and the human's note",
   );
   const proposals = mm?.previous_rounds[0].turns;
-  check(proposals?.find((turn: any) => turn.agent === "claude")?.content === proposalA &&
+  const ownA = proposals?.find((turn: any) => turn.agent === "claude");
+  check(ownA?.yours === true && ownA.summary === "按目录拆。" && !("content" in ownA) && mm.instructions.includes("yours") &&
     proposals?.find((turn: any) => turn.agent === "codex")?.content === proposalB &&
-    proposals?.find((turn: any) => turn.agent === "codex")?.tasks[0].title === "草案", "the immediately preceding round keeps full text and task drafts");
+    proposals?.find((turn: any) => turn.agent === "codex")?.tasks[0].title === "草案", "the preceding round keeps others' full text and drafts, and only summarizes your own turn");
   await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "同意 B" });
-  await call(codex, "fetch_inbox", { agent_id: "codex" });
+  await call(codex, "join", { agent_id: "codex" }); // a rejoin may be a new conversation that never saw its own proposal
+  const afterRejoin = meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" }))?.previous_rounds[0].turns;
+  check(afterRejoin?.find((turn: any) => turn.agent === "codex")?.content === proposalB &&
+    afterRejoin?.find((turn: any) => turn.agent === "claude")?.content === proposalA && !afterRejoin.some((turn: any) => turn.yours),
+    "after a rejoin your own previous turn comes back in full");
   await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: "同意" });
   await api(`/api/meetings/${mid}/next`, { action: "finalize", note: "" });
   check(!meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" })), "final round goes to the facilitator only");
@@ -447,8 +458,9 @@ try {
   check(earlier?.length === 2 && earlier.every((t: any) => t.summary && !("content" in t) && !("tasks" in t) && !("decisions" in t)) &&
     earlier.find((t: any) => t.agent === "claude")?.summary === "按目录拆。" &&
     earlier.find((t: any) => t.agent === "codex")?.summary.length === 160 &&
-    mm.previous_rounds.find((round: any) => round.round === 2)?.turns.some((t: any) => t.content === "同意 B"),
-    "final mail summarizes each older speaker and carries the previous critique in full");
+    mm.previous_rounds.find((round: any) => round.round === 2)?.turns.some((t: any) => t.agent === "codex" && t.content === "同意") &&
+    mm.previous_rounds.find((round: any) => round.round === 2)?.turns.some((t: any) => t.agent === "claude" && t.yours && t.summary === "同意 B" && !("content" in t)),
+    "final mail summarizes each older speaker and carries the previous critique in full (yours as a summary)");
   const cyc = await call(claude, "submit_meeting_turn", {
     agent_id: "claude", meeting_id: mid, content: "x",
     tasks: [{ id: "T1", title: "a", owner: "claude", depends_on: ["T2"] }, { id: "T2", title: "b", owner: "nobody", depends_on: ["T1"] }],
@@ -582,6 +594,9 @@ try {
   await call(codex, "submit_handoff", { agent_id: "codex", summary: "d 完成", files_changed: ["d/one.txt"] });
   t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   check(t?.task?.key === "T1" && t.stage.id === "review" && t.input_handoff?.summary === "a 完成", "codex then gets the T1 review");
+  check(t.stage.instructions.includes("verdict") && !t.instructions.includes("verdict 填 approve") && t.instructions.includes("task.paths") &&
+    !t.instructions.includes(t.task.paths[0]) && t.instructions.includes("meeting_minutes") && !t.instructions.includes(t.meeting_minutes),
+    "task instructions point at task.paths, meeting_minutes and the stage's own review rule instead of copying them");
   write("a/one.txt", "a (local change left in the review scope)\n");
   sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "a 没问题", verdict: "approve", files_changed: [] });
   check(/^[0-9a-f]{40}$/.test(sub.commit) && sh("diff-tree", "-r", "--no-commit-id", "--name-only", sub.commit) === "", "last active task's review commits an empty tree diff");
