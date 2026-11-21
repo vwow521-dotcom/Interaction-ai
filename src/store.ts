@@ -116,6 +116,33 @@ export interface Attempt {
   decided_note: string | null; // human comment at the gate
 }
 
+export interface Repro {
+  command: string;
+  cwd?: string; // relative to the project root
+  expect: string;
+}
+
+export interface Issue {
+  id: string | null; // null for blocking comments from older databases
+  problem: string;
+  repro?: Repro;
+  late_reason?: string;
+  added_in_recheck?: boolean;
+}
+
+export interface Recheck {
+  id: string;
+  status: "fixed" | "not_fixed";
+  note?: string;
+  issue: Issue; // snapshot of the issue being rechecked
+}
+
+export interface Addressed {
+  id: string;
+  how: string;
+  verified?: string;
+}
+
 export interface HandoffData {
   summary: string;
   done: string[];
@@ -126,14 +153,22 @@ export interface HandoffData {
   verdict?: "approve" | "reject";
   review_comments?: string[]; // blocking issues that must be fixed
   observations?: string[]; // non-blocking suggestions
+  issues?: Issue[];
+  rechecks?: Recheck[];
+  addressed?: Addressed[];
 }
+
+export type HandoffSubmission = Omit<HandoffData, "issues" | "rechecks"> & {
+  issues?: Omit<Issue, "id" | "added_in_recheck">[];
+  rechecks?: Omit<Recheck, "issue">[];
+};
 
 /** Structured rework/approval feedback carried into an attempt (stored as JSON in attempts.feedback). */
 export interface Feedback {
   kind: "rework" | "approval_note" | "carried";
   from_stage: string;
   user_requirements: string[]; // what the human asked for at the gate — must be done
-  blocking: string[]; // review issues behind a reject verdict — must be fixed
+  blocking: Issue[]; // review issues behind a reject verdict — must be fixed
   observations: string[]; // non-blocking review notes — optional
 }
 
@@ -582,9 +617,9 @@ export class Store {
   private parseHandoff(row: any): Handoff {
     return { ...row, data: JSON.parse(row.data), scope_notes: row.scope_notes ? JSON.parse(row.scope_notes) : [] };
   }
-  handoff(id: number) {
+  handoff(id: number): Handoff | undefined {
     const r = this.one<any>("SELECT * FROM handoffs WHERE id = ?", id);
-    return r && this.parseHandoff(r);
+    return r ? this.parseHandoff(r) : undefined;
   }
   handoffs(run_id: number): Handoff[] {
     return this.all<any>("SELECT * FROM handoffs WHERE run_id = ? ORDER BY id", run_id).map((r) => this.parseHandoff(r));

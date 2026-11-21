@@ -1,7 +1,8 @@
 // Run/task DAG, attempts, and the code committed by each handoff.
 import { changedFiles, commitAll, commitPaths, globMatch, normGlob, snapshotChangedFiles } from "../git.js";
-import type { Attempt, Feedback, HandoffData, Lease, Mail, Run, Task, TaskStage } from "../store.js";
+import type { Attempt, Feedback, HandoffData, HandoffSubmission, Issue, Lease, Mail, Run, Task, TaskStage } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
+import { checkAddressed, nextIssueNumber, openAfter, reviewComment, validateReview } from "./issues.js";
 import type { Leases } from "./leases.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
@@ -60,8 +61,10 @@ export class Scheduler {
   parseFeedback(raw: string | null): Feedback | null {
     if (!raw) return null;
     try {
-      const f = JSON.parse(raw);
-      if (f && Array.isArray(f.user_requirements)) return f;
+      const f: (Omit<Feedback, "blocking"> & { blocking: (Issue | string)[] }) | null = JSON.parse(raw);
+      if (f && Array.isArray(f.user_requirements) && Array.isArray(f.blocking)) {
+        return { ...f, blocking: f.blocking.map((issue) => typeof issue === "string" ? { id: null, problem: issue } : issue) };
+      }
     } catch {}
     return { kind: "rework", from_stage: "?", user_requirements: [raw], blocking: [], observations: [] }; // pre-M2b.1 text
   }
@@ -85,21 +88,34 @@ export class Scheduler {
     const fb = this.parseFeedback(a.feedback);
     const fbGuide: Record<Feedback["kind"], string> = {
       rework:
-        "这是一次返工：user_requirements（用户要求）和 blocking（阻塞问题）必须全部完成；observations（非阻塞观察）自行判断，不做也可以。只做这些要求需要的最小改动。",
+        "这是一次返工：完成 feedback.user_requirements 和 feedback.blocking 中的要求；observations 供参考。" +
+        "提交前逐条运行 feedback.blocking[].repro，确认结果符合 expect；在 addressed 里按编号写怎么处理、跑了什么命令、结果是什么。",
       approval_note: "用户批准上一阶段时附了要求（user_requirements），请一并满足。",
       carried:
-        "本轮是返工后的复审：重点核对 user_requirements 和 blocking 是否都已满足，同时回归原有验收标准。",
+        "请核对 feedback.user_requirements 和 feedback.blocking，同时回归原有验收标准。" +
+        "复审时，rechecks 必须覆盖 feedback.blocking 里所有带编号的项，否则提交被拒；复审提出的新问题写 late_reason。",
     };
     const owned = task.stages.filter((s) => s.owns?.length).map((s) => `${s.id}：${s.owns!.join("、")}`);
     const deps = all.filter((t) => task.depends_on.includes(t.key));
     const meeting = run.meeting_id ? this.ctx.store.meeting(run.meeting_id) : undefined;
     const parallel = all.filter((t) => t.id !== task.id && t.status === "active").map((t) => `${t.key}（${t.owner}）：${t.paths.join("、") || "未声明范围"}`);
     const showTask = multi || !!meeting;
-    // A rework's feedback already holds the rejected handoff's review_comments and observations; don't send them twice.
     const fromRejected = fb?.kind === "rework" && input?.stage_id === fb.from_stage;
-    const inputData = input && fromRejected ? (({ review_comments: _c, observations: _o, ...rest }) => rest)(input.data) : input?.data;
-    // A re-review needs this round's requirements and blocking issues; the previous review's non-blocking notes are its own.
-    const feedback = fb?.kind === "carried" ? { ...fb, observations: [] } : fb;
+    let inputData = input?.data;
+    let feedback = fb;
+    if (inputData && fromRejected) {
+      const { review_comments, observations, issues, rechecks, ...rest } = inputData;
+      inputData = rest;
+    }
+    if (fb?.kind === "carried") {
+      const evidence = new Map(inputData?.addressed?.map(({ id, how, verified }) => [id, { how, verified }]));
+      if (inputData) {
+        const { addressed, ...rest } = inputData;
+        inputData = rest;
+      }
+      const blocking = fb.blocking.map((issue) => ({ ...issue, addressed: issue.id === null ? null : evidence.get(issue.id) ?? null }));
+      feedback = { ...fb, blocking, observations: [] };
+    }
     return {
       resumed,
       run: { id: run.id, goal: run.goal },
@@ -296,7 +312,7 @@ export class Scheduler {
   }
 
   /** Decide what the handoff commits and what to tell the human about scope. */
-  private async scopeAndCommit(run: Run, task: Task, attempt: Attempt, stage: TaskStage, agent: string, data: HandoffData) {
+  private async scopeAndCommit(run: Run, task: Task, attempt: Attempt, stage: TaskStage, agent: string, data: HandoffData, scope_notes: string[]) {
     const changed = await changedFiles(this.ctx.cfg.projectDir);
     const declared = new Set(data.files_changed.map(norm));
     const tasks = this.ctx.store.tasks(run.id);
@@ -307,7 +323,6 @@ export class Scheduler {
     const otherLeases = leases.filter((l) => !mine(l));
     const ownGlobs = [...task.paths, ...leases.filter(mine).map((l) => l.glob)];
     const holderOf = (f: string) => otherLeases.find((l) => inGlob(l.glob, f));
-    const scope_notes: string[] = [];
 
     let toCommit: string[] | null = null; // legacy unscoped pipeline handoff
     let considered = changed;
@@ -376,7 +391,7 @@ export class Scheduler {
     return { commit_sha, commit_error, scope_notes, scoped: !!toCommit };
   }
 
-  async submitHandoff(agent: string, sessionId: string | undefined, data: HandoffData, taskKey?: string): Promise<Result> {
+  async submitHandoff(agent: string, sessionId: string | undefined, submission: HandoffSubmission, taskKey?: string): Promise<Result> {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
     const run = this.ctx.store.openRun();
@@ -391,7 +406,34 @@ export class Scheduler {
     const task = this.ctx.store.task(a.task_id)!;
     const stage = this.stageOf(task, a.stage_id);
     if (this.committing.has(a.id)) return err("这个阶段的交接正在提交。");
-    const commit = this.scopeAndCommit(run, task, a, stage, agent, data);
+    const fb = this.parseFeedback(a.feedback);
+    const review = !!stage.on_reject || !!submission.verdict;
+    const blocking = review ? fb?.blocking ?? [] : [];
+    const problems = validateReview(submission, review, blocking);
+    if (problems.length) return err(problems.join("\n"));
+
+    const { issues: newIssues, rechecks, ...fields } = submission;
+    const scopeNotes: string[] = [];
+    const data: HandoffData = { ...fields, addressed: checkAddressed(fields.addressed, fb, scopeNotes) };
+    if (submission.verdict) {
+      const byId = new Map(blocking.map((issue) => [issue.id, issue]));
+      data.rechecks = rechecks?.map((entry) => ({ ...entry, issue: byId.get(entry.id)! }));
+    }
+    if (submission.verdict === "reject") {
+      const addedInRecheck = blocking.length > 0 || (fb?.kind === "carried" && fb.from_stage === stage.id);
+      const raised = newIssues?.length ? newIssues : (fields.review_comments ?? []).map((problem) => ({ problem }));
+      let number = raised.length ? nextIssueNumber(task, this.ctx.store.taskHandoffs(task.id)) : 1;
+      data.issues = raised.map((issue) => ({
+        ...issue, id: `${task.key}-B${number++}`, added_in_recheck: addedInRecheck || undefined,
+      }));
+      for (const issue of data.issues) {
+        if (issue.added_in_recheck && !issue.late_reason?.trim()) scopeNotes.push(`${issue.id} 是复审新增问题，未填写 late_reason。`);
+      }
+      const stillOpen = openAfter(blocking, data.rechecks, data.issues);
+      const newIds = new Set(data.issues.map(({ id }) => id));
+      data.review_comments = stillOpen.map((issue) => reviewComment(issue, !newIds.has(issue.id)));
+    }
+    const commit = this.scopeAndCommit(run, task, a, stage, agent, data, scopeNotes);
     this.committing.set(a.id, commit);
     const { commit_sha, commit_error, scope_notes } = await commit.finally(() => this.committing.delete(a.id));
     if (this.ctx.store.attempt(a.id)?.status !== "in_progress") return err("这个阶段已停止或被替换，交接未推进流程。");
@@ -416,7 +458,6 @@ export class Scheduler {
     }
     this.ctx.store.updateAttempt(a.id, { status: "done", handoff_id: h.id, ended_at: ended });
     // A rework round's requirements travel on, so the next reviewer knows what this round was for.
-    const fb = this.parseFeedback(a.feedback);
     this.advance(run, task, stage.id, fb && fb.kind !== "approval_note" ? { ...fb, kind: "carried" } : null);
     this.deliver(agent);
     const nextLive = this.ctx.store.taskLiveAttempt(task.id);
@@ -455,13 +496,19 @@ export class Scheduler {
       this.holdCancellation(a, task, this.postman.cancelAcpMail(this.ctx.store.taskMailFor(a.id).map((m) => m.id)));
       const target = this.stageOf(task, stage.on_reject ?? stage.id);
       const comments = h?.data.review_comments ?? [];
-      const rejected = h?.data.verdict === "reject";
+      const rejected = h?.data.verdict === "reject" && h.data;
+      let blocking: Issue[] = [];
+      if (rejected) {
+        blocking = rejected.issues === undefined && rejected.rechecks === undefined
+          ? comments.map((problem) => ({ id: null, problem })) // 0.10.1 handoff still awaiting the human decision
+          : openAfter(this.parseFeedback(a.feedback)?.blocking ?? [], rejected.rechecks, rejected.issues);
+      }
       // Review comments are blocking only when the reviewer itself rejected; otherwise they are observations.
       const fb: Feedback = {
         kind: "rework",
         from_stage: stage.id,
         user_requirements: trimmed ? [trimmed] : [],
-        blocking: rejected ? comments : [],
+        blocking,
         observations: [...(rejected ? [] : comments), ...(h?.data.observations ?? [])],
       };
       this.ctx.event(run.id, null, "gate", `你打回了「${label}${stage.id}」→「${target.id}」${trimmed ? "：" + trimmed : ""}`);

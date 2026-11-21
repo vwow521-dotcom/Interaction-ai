@@ -230,7 +230,22 @@ export function buildServer(engine: Engine, client: BridgeClient, acpAgent?: str
         files_changed: z.array(z.string()).default([]).describe("改动的文件路径"),
         notes_for_next: z.string().default("").describe("给下一个角色的注意事项"),
         verdict: z.enum(["approve", "reject"]).optional().describe("仅审查阶段：approve 通过 / reject 打回"),
-        review_comments: z.array(z.string()).optional().describe("仅审查阶段：必须修改的阻塞问题"),
+        review_comments: z.array(z.string()).optional().describe("旧写法；建议改用 issues"),
+        issues: z.array(z.strictObject({
+          problem: z.string(),
+          repro: z.object({ command: z.string(), cwd: z.string().optional(), expect: z.string() }).optional(),
+          late_reason: z.string().optional(),
+        })).optional().describe("仅审查阶段：本轮新增的阻塞问题。编号由桥分配；复审新增时说明上轮没发现的原因"),
+        rechecks: z.array(z.object({
+          id: z.string(),
+          status: z.enum(["fixed", "not_fixed"]),
+          note: z.string().optional(),
+        })).optional().describe("复审时按编号逐条核对 feedback.blocking 中仍开放的问题"),
+        addressed: z.array(z.object({
+          id: z.string(),
+          how: z.string(),
+          verified: z.string().optional(),
+        })).optional().describe("返工时按编号说明怎么改、验证命令和结果"),
         observations: z.array(z.string()).optional().describe("仅审查阶段：不影响通过的建议（非阻塞）"),
         task_id: z.string().optional().describe("可选：任务编号（如 T2）。你同时有多个进行中的任务时用来指明提交哪一个"),
       },

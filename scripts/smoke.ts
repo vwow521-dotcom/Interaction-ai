@@ -17,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { issueSummary } from "../src/engine/issues.js";
 import { smokeCli } from "./p2-cli-smoke.js";
 import { smokeAcp } from "./acp-smoke.js";
 import { smokeAcpProcess } from "./acp-process-smoke.js";
@@ -295,10 +296,31 @@ try {
   const d2 = await call(codex, "send_mail", { agent_id: "codex", to: "claude", subject: "提醒", body: "x", mail_id: "dup-1" });
   check(d1.duplicate === false && d2.duplicate === true, "same mail_id is delivered once (dedupe)");
 
+  // Capture the durable effects of a handoff independently of presence and tool-call counters.
+  const handoffState = async () => {
+    const snapshot = await state();
+    return JSON.stringify({
+      head: sh("rev-parse", "HEAD"),
+      handoffs: snapshot.handoffs.length,
+      attempts: snapshot.attempts.map(({ id, status, handoff_id }: any) => ({ id, status, handoff_id })),
+      taskMail: snapshot.mail.filter((m: any) => m.kind === "task").map(({ id, status }: any) => ({ id, status })),
+    });
+  };
+  const rejectedHandoff = async (member: Client, agent_id: string, args: object, expected: RegExp, label: string) => {
+    const before = await handoffState();
+    const r: any = await member.callTool({ name: "submit_handoff", arguments: { agent_id, summary: label, ...args } });
+    const error = r.isError ? r.content[0].text : JSON.parse(r.content[0].text).error;
+    check(typeof error === "string" && expected.test(error), label);
+    check(before === await handoffState(), `${label}: HEAD, handoffs, attempts and task mail unchanged`);
+    return error as string;
+  };
+  await rejectedHandoff(codex, "codex", { issues: [{ problem: "在实现阶段提出问题" }] }, /只有审查阶段/, "V1: implementation cannot raise issues");
+
   write("hello.js", "console.log('hello')\n");
   write("extra.txt", "not declared\n");
-  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "实现 v1", files_changed: ["hello.js"] });
+  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "实现 v1", files_changed: ["hello.js"], addressed: [{ id: "T1-B1", how: "初次实现" }] });
   check(sub.next === "claude/review", "implement → review");
+  check(sub.scope_notes.some((n: string) => n.includes("addressed 只用于返工交接")), "addressed outside rework is advisory");
   s = await state();
   check(s.handoffs.at(-1).scope_notes.some((n: string) => n.includes("extra.txt")), "undeclared changed file flagged in scope notes");
 
@@ -312,30 +334,96 @@ try {
     ctx.handoffs_total === 2 && ctx.recent_handoffs.length === 1 && ctx.older_handoffs.length === 1 && ctx.notes.some((n: any) => n.text === "用 node 写"),
     "get_context returns only the last N handoffs in full",
   );
-  sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "缺感叹号", verdict: "reject", review_comments: ["输出没有感叹号"], observations: ["变量名可以更清楚"] });
+  const firstIssue = { problem: "输出没有感叹号", repro: { command: "node hello.js", expect: "输出 hello!", cwd: "." } };
+  await rejectedHandoff(claude, "claude", { issues: [firstIssue] }, /填写 verdict/, "V2: an issue requires a verdict");
+  await rejectedHandoff(claude, "claude", { verdict: "reject", issues: [{ ...firstIssue, id: "T1-B9" }] }, /\bid\b/, "V3: explicit issue ID rejected by MCP");
+  await rejectedHandoff(claude, "claude", { verdict: "reject", issues: [{ ...firstIssue, ref: "T1-B9" }] }, /\bref\b/, "V3: issue ref rejected by MCP");
+  await rejectedHandoff(claude, "claude", { verdict: "reject", issues: [firstIssue], review_comments: [firstIssue.problem] }, /只能选一种/, "V3: competing issue inputs rejected");
+  for (const repro of [
+    { ...firstIssue.repro, command: " " },
+    { ...firstIssue.repro, expect: " " },
+    { ...firstIssue.repro, cwd: "C:\\outside" },
+    { ...firstIssue.repro, cwd: "/outside" },
+    { ...firstIssue.repro, cwd: "child\\..\\..\\outside" },
+  ]) {
+    await rejectedHandoff(claude, "claude", { verdict: "reject", issues: [{ problem: firstIssue.problem, repro }] }, /repro\.(command|cwd)/,
+      `V4: invalid repro rejected (${JSON.stringify(repro)})`);
+  }
+  await rejectedHandoff(claude, "claude", { verdict: "approve", rechecks: [{ id: "T1-B1", status: "fixed" }] }, /没有待核对的编号/, "V5: initial review has nothing to recheck");
+  await rejectedHandoff(claude, "claude", { verdict: "reject" }, /至少一个 not_fixed/, "V7: reject requires an open issue");
+  await rejectedHandoff(claude, "claude", { verdict: "approve", issues: [firstIssue] }, /approve 不能提交新增 issues/, "V8: approve cannot add an issue");
+  sub = await call(claude, "submit_handoff", {
+    agent_id: "claude", summary: "缺感叹号", verdict: "reject", observations: ["变量名可以更清楚"],
+    issues: [firstIssue, { problem: "缺少空输入测试" }, { problem: "缺少示例" }, { problem: "缺少版本说明" }],
+  });
   check(/^[0-9a-f]{40}$/.test(sub.commit), "review with no file changes still gets an (empty) commit");
   s = await state();
+  check(s.handoffs.at(-1).data.review_comments[0] === "T1-B1：输出没有感叹号（复现：node hello.js @ .；期望：输出 hello!）" &&
+    sh("log", "-1", "--format=%b").includes(s.handoffs.at(-1).data.review_comments[0]), "structured issue has a compatible review comment and Git message");
   await api(`/api/attempts/${s.live.id}/decide`, { action: "reject", note: "按审查意见改" });
   t = task(await call(codex, "wait_for_mail", { agent_id: "codex" }));
   check(
     t?.stage.id === "implement" && t.feedback.kind === "rework" && t.feedback.user_requirements[0] === "按审查意见改" &&
-      t.feedback.blocking[0] === "输出没有感叹号" && t.feedback.observations[0] === "变量名可以更清楚",
+      t.feedback.blocking[0].id === "T1-B1" && t.feedback.blocking[0].problem === firstIssue.problem &&
+      t.feedback.blocking[0].repro.command === firstIssue.repro.command && t.feedback.observations[0] === "变量名可以更清楚" &&
+      t.instructions.includes("feedback.blocking[].repro"),
     "rework feedback split into user requirements / blocking / observations",
   );
   check(t.input_handoff?.from === "claude/review" && t.input_handoff.summary === "缺感叹号" && t.input_handoff.verdict === "reject" &&
-    !("review_comments" in t.input_handoff) && !("observations" in t.input_handoff) && t.instructions.includes("不再重复"),
+    ["review_comments", "observations", "issues", "rechecks"].every((field) => !(field in t.input_handoff)) && t.instructions.includes("不再重复"),
     "rework input_handoff drops the review comments already in feedback");
   write("hello.js", "console.log('hello!')\n");
   write("DESIGN.md", "# hello\nprint hello!\n");
-  await call(codex, "submit_handoff", { agent_id: "codex", summary: "加了感叹号", files_changed: ["hello.js", "DESIGN.md"] });
+  sub = await call(codex, "submit_handoff", {
+    agent_id: "codex", summary: "加了感叹号", files_changed: ["hello.js", "DESIGN.md"], addressed: [
+      { id: "T1-B1", how: "添加标点", verified: "node hello.js → hello!" },
+      { id: "T1-B3", how: "新增示例" }, { id: "T1-B3", how: "重复填写" },
+      { id: "T1-B4", how: "补版本说明", verified: " " }, { id: "T1-B99", how: "错误编号" },
+    ],
+  });
+  check([
+    ["未说明", "T1-B2"], ["重复", "T1-B3"], ["verified", "T1-B4"], ["未知", "T1-B99"],
+  ].every(([label, id]) => sub.scope_notes.some((note: string) => note.includes(label) && note.includes(id))),
+    "missing, duplicate, unverified and unknown addressed entries only produce scope notes");
   s = await state();
   check(s.handoffs.at(-1).scope_notes.some((n: string) => n.includes("plan") && n.includes("DESIGN.md")), "touching another stage's file flagged");
   t = task(await call(claude, "wait_for_mail", { agent_id: "claude" }));
   check(t?.stage.id === "review" && t.feedback?.kind === "carried" && t.feedback.user_requirements[0] === "按审查意见改", "re-review carries this round's user requirements");
-  check(t.feedback.blocking[0] === "输出没有感叹号" && t.feedback.observations.length === 0 && t.input_handoff?.summary === "加了感叹号" &&
+  check(t.feedback.blocking[0].problem === firstIssue.problem && t.feedback.blocking[0].addressed?.verified === "node hello.js → hello!" &&
+    t.feedback.blocking[1].addressed === null && t.feedback.blocking[2].addressed === null && t.feedback.blocking[3].addressed?.how === "补版本说明" &&
+    t.feedback.observations.length === 0 && t.input_handoff?.summary === "加了感叹号" && !("addressed" in t.input_handoff) &&
     t.stage.instructions === null && (t.instructions.match(/verdict 填 approve/g) ?? []).length === 1,
-    "re-review keeps blocking issues and drops the old review's observations; a stage without its own rule gets the generic one once");
-  await call(claude, "submit_handoff", { agent_id: "claude", summary: "通过", verdict: "approve" });
+    "re-review aligns valid evidence with issues and drops duplicate addressed and observations");
+  await rejectedHandoff(claude, "claude", {}, /填写 verdict/, "V2: open issues require a verdict even when rechecks are omitted");
+  const rechecks = [
+    { id: "T1-B1", status: "fixed" }, { id: "T1-B2", status: "not_fixed", note: "待补测试" },
+    { id: "T1-B3", status: "fixed" }, { id: "T1-B4", status: "fixed" },
+  ];
+  const coverageError = await rejectedHandoff(claude, "claude", {
+    verdict: "reject", rechecks: [rechecks[0], rechecks[0], ...rechecks.slice(2), { id: "T1-B99", status: "fixed" }],
+    issues: [{ problem: "待复核" }],
+  }, /缺少编号：T1-B2/, "V6: recheck must cover all open IDs once");
+  check(/重复编号：T1-B1/.test(coverageError) && /未知编号：T1-B99/.test(coverageError), "V6 reports missing, duplicate and unknown IDs separately");
+  await rejectedHandoff(claude, "claude", { verdict: "approve", rechecks }, /仍有未修复编号：T1-B2/, "V8: approve cannot leave an issue not_fixed");
+  sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "测试仍需补齐", verdict: "reject", rechecks, review_comments: ["缺少退出码测试"] });
+  s = await state();
+  const secondReview = s.handoffs.at(-1).data;
+  const summary = issueSummary(secondReview);
+  check(summary.previous_open === 4 && summary.fixed === 3 && summary.not_fixed === 1 && summary.added === 1 && summary.late === 1 &&
+    secondReview.issues[0].id === "T1-B5" && secondReview.rechecks[0].issue.repro.expect === firstIssue.repro.expect &&
+    secondReview.review_comments.join("|") === "[未修复] T1-B2：缺少空输入测试|T1-B5：缺少退出码测试" &&
+    sub.scope_notes.some((n: string) => n.includes("T1-B5") && n.includes("late_reason")), "second rejection numbers legacy-format input, preserves snapshots and warns about missing late_reason");
+  await api(`/api/attempts/${s.live.id}/decide`, { action: "reject", note: "" });
+  t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
+  check(t.feedback.blocking.map((issue: any) => issue.id).join(",") === "T1-B2,T1-B5" &&
+    ["review_comments", "observations", "issues", "rechecks"].every((field) => !(field in t.input_handoff)),
+    "second rework retains only not_fixed and newly numbered issues without a duplicate copy");
+  write("hello.js", "export const greeting = 'hello!'\nconsole.log(greeting)\n");
+  await call(codex, "submit_handoff", { agent_id: "codex", summary: "补测试", files_changed: ["hello.js"] });
+  t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(t.feedback.blocking.every((issue: any) => issue.addressed === null), "another round of rework does not reuse old evidence");
+  await call(claude, "submit_handoff", { agent_id: "claude", summary: "通过", verdict: "approve",
+    rechecks: [{ id: "T1-B2", status: "fixed" }, { id: "T1-B5", status: "fixed" }] });
   s = await state();
   await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "" });
   s = await state();
@@ -344,7 +432,7 @@ try {
   check(idleClaude?.activity.state === "idle" && idleClaude.lastSeenAt && idleClaude.activity.since === idleClaude.lastSeenAt,
     "Office uses the same latest activity timestamp as member details after a handoff");
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
-  check(commits.length === 5 && commits.some((c) => c.includes("审查通过")), `5 bridge commits incl. review conclusions (got ${commits.length})`);
+  check(commits.length === 7 && commits.some((c) => c.includes("审查通过")), `7 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
   const [panel, mainAsset, cssAsset, oldPanel, oldScript, oldStyle] = await Promise.all(
     ["/", "/panel/js/main.js", "/panel/app.css", "/v1", "/panel/v1/room.js", "/panel/v1/room.css"].map((p) => fetch(BASE + p)),
@@ -1418,6 +1506,82 @@ notify: { enabled: false }
   check(offlineJoin.isError === true && /ai-bridge start/.test(offlineJoin.content?.[0]?.text ?? ""),
     "a call while the daemon is down returns a tool error that says how to start the bridge");
   await warm.close();
+
+  // ===== Review compatibility: legacy rows and a human overriding a rejection =====
+  console.log("— Review compatibility: 0.10.1 feedback and human override");
+  await stopDaemon();
+  const reviewProject = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-review-"));
+  const reviewGit = (...args: string[]) => execFileSync("git", ["-C", reviewProject, ...args], { stdio: "ignore" });
+  reviewGit("init", "-q");
+  reviewGit("config", "user.name", "bridge-smoke");
+  reviewGit("config", "user.email", "bridge-smoke@example.invalid");
+  fs.writeFileSync(path.join(reviewProject, "bridge.config.yaml"), `agents: { builder: {}, reviewer: {} }
+pipeline:
+  - { id: implement, role: 实现, agent: builder }
+  - { id: review, role: 审查, agent: reviewer, gate: true, on_reject: implement }
+  - { id: followup, role: 后续审查, agent: reviewer, gate: true, on_reject: implement }
+notify: { enabled: false }
+`);
+  reviewGit("add", "-A");
+  reviewGit("commit", "-qm", "init");
+  await startDaemon(reviewProject);
+  let builder = await connect("builder");
+  let reviewer = await connect("reviewer");
+  await call(builder, "join", { agent_id: "builder" });
+  await call(reviewer, "join", { agent_id: "reviewer" });
+  await api("/api/runs", { goal: "升级时留下的审查" });
+  await call(builder, "fetch_inbox", { agent_id: "builder" });
+  await call(builder, "submit_handoff", { agent_id: "builder", summary: "初次实现" });
+  await call(reviewer, "fetch_inbox", { agent_id: "reviewer" });
+  await call(reviewer, "submit_handoff", { agent_id: "reviewer", summary: "旧审查", verdict: "reject", review_comments: ["旧阻塞问题"] });
+  const legacyGate = (await state()).live;
+  await builder.close();
+  await reviewer.close();
+  await stopDaemon();
+  const reviewDb = path.join(reviewProject, ".bridge", "bridge.db");
+  {
+    const db = new DatabaseSync(reviewDb);
+    db.prepare("UPDATE handoffs SET data = json_remove(json_set(data, '$.review_comments', json(?)), '$.issues', '$.rechecks') WHERE id = ?")
+      .run(JSON.stringify(["旧阻塞问题"]), legacyGate.handoff_id);
+    db.close();
+  }
+  await startDaemon(reviewProject);
+  check((await api(`/api/attempts/${legacyGate.id}/decide`, { action: "reject", note: "保留原要求" })).status === 200, "a legacy review awaiting approval can still be rejected");
+  const legacyRework = (await state()).live;
+  check(JSON.parse(legacyRework.feedback).blocking[0].id === null, "rejecting a pre-0.11 review preserves its text without retroactive numbering");
+  await stopDaemon();
+  {
+    const db = new DatabaseSync(reviewDb);
+    db.prepare("UPDATE attempts SET feedback = json_set(feedback, '$.blocking', json(?)) WHERE id = ?")
+      .run(JSON.stringify(["旧阻塞问题"]), legacyRework.id);
+    db.close();
+  }
+  await startDaemon(reviewProject);
+  builder = await connect("builder-after-upgrade");
+  reviewer = await connect("reviewer-after-upgrade");
+  await call(builder, "join", { agent_id: "builder" });
+  await call(reviewer, "join", { agent_id: "reviewer" });
+  t = task(await call(builder, "fetch_inbox", { agent_id: "builder" }));
+  check(t?.feedback.blocking[0].id === null && t.feedback.blocking[0].problem === "旧阻塞问题" && t.feedback.user_requirements[0] === "保留原要求",
+    "a persisted 0.10.1 blocking string is readable in a task after daemon restart");
+  await call(builder, "submit_handoff", { agent_id: "builder", summary: "返工" });
+  t = task(await call(reviewer, "fetch_inbox", { agent_id: "reviewer" }));
+  check(t?.feedback.blocking[0].id === null, "legacy blocking text remains visible for the first re-review");
+  sub = await call(reviewer, "submit_handoff", { agent_id: "reviewer", summary: "仍有旧问题", verdict: "reject", review_comments: ["旧阻塞问题"] });
+  s = await state();
+  check(sub.status === "submitted" && s.handoffs.at(-1).data.issues[0].id === "T1-B1",
+    "an unnumbered legacy issue can be raised again without rechecks and gets the first number");
+  await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "仍然通过" });
+  t = task(await call(reviewer, "fetch_inbox", { agent_id: "reviewer" }));
+  check(t?.stage.id === "followup" && t.feedback.blocking.length === 0 && t.feedback.user_requirements[0] === "仍然通过",
+    "a human approving reject clears blocking for the downstream reviewer");
+  sub = await call(reviewer, "submit_handoff", { agent_id: "reviewer", summary: "复核通过", verdict: "approve", review_comments: ["旧格式的观察"] });
+  s = await state();
+  check(sub.status === "submitted" && s.handoffs.at(-1).data.issues === undefined && s.handoffs.at(-1).data.review_comments[0] === "旧格式的观察",
+    "downstream can approve without rechecks and legacy approve comments remain unnumbered");
+  await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "" });
+  await builder.close();
+  await reviewer.close();
 
   await stopDaemon();
   await smokeAcp({ root: ROOT, base: BASE, codexEnv: { BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
