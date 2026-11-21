@@ -394,8 +394,90 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
 
 在 `.bridge/bridge.db` 的副本上把历史上所有信件重放了一遍。任务信每封约 2.2k 到 5k 字；会议互评轮最大，会议 #3 达到 22k 字；聊天信约 1.5k 字。7 次返工里，`feedback` 和 `input_handoff` 合计约 16.5k 字，其中约 5.3k 字（32%）是同一份审查意见发了两遍。改动只发生在生成信件的那一层，数据库、面板和 `get_context` 都不变。
 
-- **返工信**。被打回的那份交接里的 `review_comments` 和 `observations` 已经整理进 `feedback.blocking` 和 `feedback.observations`，`input_handoff` 里不再带这两项，`summary`、`done`、`verdict` 和提交 SHA 照常保留。
-- **复审信**。带过来的反馈（`carried`）保留 `user_requirements` 和 `blocking`，不再带上一次审查的非阻塞观察。
+- **返工信**。被打回的那份交接里的 `review_comments`、`observations`、`issues` 和 `rechecks` 已经整理进 `feedback`，`input_handoff` 里不再带这四项；`feedback.blocking` 是上一轮仍未关闭的编号问题（带 `repro`），`summary`、`done`、`verdict` 和提交 SHA 照常保留。
+- **复审信**。带过来的反馈（`carried`）保留 `user_requirements` 和 `blocking`，并把返工方对应的 `addressed` 并入每个 blocking 项；`input_handoff` 去掉已经投影的 `addressed`，也不再带上一次审查的非阻塞观察。
 - **会议信**。上一轮的发言里，收信人自己那条只给一句摘要，并标 `yours: true`。如果成员在写完那条发言之后才绑定或 join（新对话、接管、后台成员重启），说明当前对话可能没见过它，就照常发全文。是否 join 过用 `presence.joinedAt` 判断，因为新开的 Codex 对话可能沿用同一个 MCP 会话。
 - **说明文字**。说明里不再抄写已有的字段，改成指向 `task.paths`、`meeting_minutes`。阶段自己的 `instructions` 已经写了审查规则时，不再追加通用的那句审查规则。
 - **没有改的**。每封信都带任务描述，因为 ACP 成员和新对话里没有上下文。互评轮照常给其他人上一轮的全文。更大的开销其实来自跨多个运行一直不关的长对话，以及反复读代码、跑 smoke，这些不在信件里。
+
+## 25. 审查效率：编号、逐条复核和共享目录（0.11）
+
+0.11 把「实现 → 审查 → 返工 → 复审」之间的一段自由文字，变成可以按编号逐条核对的记录。所有状态都写在交接 JSON 里，不建新表；0.10.1 的旧库只做读兼容。
+
+### 25.1 数据
+
+```ts
+interface Repro { command: string; cwd?: string; expect: string }   // cwd 相对项目根，省略为项目根
+interface Issue {
+  id: string | null;            // 桥分配，如 "T2-B3"；0.10.1 的旧数据为 null
+  problem: string;
+  repro?: Repro;
+  late_reason?: string;
+  added_in_recheck?: boolean;   // 桥写入：在复审中提出的新问题
+}
+interface Recheck { id: string; status: "fixed" | "not_fixed"; note?: string; issue: Issue }
+interface Addressed { id: string; how: string; verified?: string }
+HandoffData += { issues?: Issue[]; rechecks?: Recheck[]; addressed?: Addressed[] }
+Feedback.blocking: Issue[]      // 旧库的字符串数组读成 { id: null, problem }
+```
+
+`submit_handoff` 接受的是 `HandoffSubmission`：`issues` 用 `z.strictObject`，只允许 `problem`、`repro`、`late_reason`，带 `id` 或 `ref` 会在参数校验阶段被拒绝；`rechecks` 由调用方给 `id`/`status`/`note`，当轮的 `issue` 快照由桥补。桥写回交接时补 `issues[].id`、`added_in_recheck` 和 `rechecks[].issue`。快照让每份历史交接独立渲染，面板不用回放历史。
+
+### 25.2 编号
+
+- 格式 `<task.key>-B<n>`；单任务的流水线运行也写成 `T1-B1`。
+- 唯一性范围是任务行（`task.id`），字符串里不带运行号。
+- 只在审查结论为 `reject`、且第 25.3 节的校验全部通过后，按 `issues` 数组顺序分配；n 是本任务已有交接里 `data.issues[].id` 的最大序号加 1。
+- 被拒绝的提交不会写交接，重试从同一份历史分配，编号不变。旧数据不回填编号，旧问题以 `id: null` 显示。
+
+### 25.3 校验
+
+审查阶段 = `stage.on_reject` 有值，或本次提交传了 `verdict`。**待核对集合** = 本次 attempt 的 `feedback.blocking` 里 `id` 不为 null 的项。
+
+以下校验都在 `scopeAndCommit` 之前执行。失败时返回错误并列出涉及的编号，不执行 git 提交、不写交接、不确认任务信，attempt 保持 `in_progress`，修正后可以原样重提。
+
+| # | 拒绝条件 |
+|---|---|
+| V1 | 非审查阶段传了非空的 `issues` 或 `rechecks` |
+| V2 | 传了非空的 `issues`/`rechecks`，或待核对集合不为空，但没有 `verdict` |
+| V3 | `issues` 的某一项带 `id`/`ref`（strict schema）；或 `issues` 与旧写法 `review_comments` 同时非空 |
+| V4 | `repro.command` 或 `repro.expect` 为空；或 `repro.cwd` 是绝对路径、规范化后跑出项目根 |
+| V5 | 待核对集合为空，却传了非空的 `rechecks` |
+| V6 | `rechecks` 没有恰好覆盖待核对集合：漏答、重复编号、未知编号分组列出 |
+| V7 | `verdict: reject`，但既没有 `not_fixed`，也没有新问题（`issues` 和旧写法 `review_comments` 都算） |
+| V8 | `verdict: approve`，但带了新 `issues`，或存在 `not_fixed` |
+
+只写进 `scope_notes`（审批卡可见，不拒绝）：
+
+- 复审轮新增的问题没写 `late_reason`；
+- `addressed` 漏写编号、含未知/重复编号，或 `verified` 为空；未知和重复的条目不会并入复审信；
+- 非返工阶段传了 `addressed`。
+
+旧写法：`review_comments` 配合 `reject` 时，每条按原顺序转成 `{ problem }`，和 `issues` 一样编号；配合 `approve` 时沿用旧行为，当作观察，不编号。
+
+### 25.4 派生、载荷与豁免
+
+- `openAfter(blocking, rechecks, newIssues)`：保留 `blocking` 里被答成 `not_fixed` 的带编号项，加上本轮新增的 `issues`。`fixed` 的项关闭；`id: null` 的旧项只出现一轮，复审认为它仍是阻塞问题时可以作为新问题重新提出，获得新编号。
+- 审查提交 `reject` 时，桥把 `data.review_comments` 写成 `openAfter` 的字符串：`T2-B3：描述（复现：命令 @ cwd；期望：…）`，`not_fixed` 的旧项加 `[未修复] ` 前缀。旧面板和 git 提交信息继续读这个字段。
+- `decide(reject)`：审查方 verdict 是 `reject` 时，下一轮 `feedback.blocking` = `openAfter(attempt.feedback.blocking, h.rechecks, h.issues)`，每项带 `repro`。人工打回一份 verdict 为 `approve` 的审查时，`blocking` 为空。旧库中还在等人工审批的交接没有 `issues`/`rechecks`，按 `review_comments` 转成 `id: null` 的项处理。
+- **人工批准一份 reject 审查**：走现有推进逻辑，下游阶段拿到的 `feedback` 是 `approval_note` 或空，`blocking` 为空，所以不再要求复核。这就是豁免，不另设状态。
+- **返工信**：`feedback.blocking` 带编号、描述和 `repro`；说明文字要求提交前逐条运行 `repro`，确认结果符合 `expect`，并在 `addressed` 里按编号写处理方式、命令和结果。`input_handoff` 去掉 `review_comments`、`observations`、`issues`、`rechecks`。
+- **复审信**（`carried`）：`feedback.blocking` 每项并入返工方对应的 `addressed: { how, verified }`（没有就是 `null`）；`input_handoff` 去掉 `addressed`；上一轮的 `observations` 照旧去掉；说明文字要求 `rechecks` 覆盖所有带编号的项，新问题写 `late_reason`。
+- **面板**：`room.handoff()` 增加 `issue_summary: { previous_open, fixed, not_fixed, added, late }`，其中 `previous_open = rechecks.length`，`late` 是复审新增且没写 `late_reason` 的条数。主面板按编号显示问题、复现命令（可复制）、执行目录、期望和状态；复审卡显示「上一轮 N 项：已修复 a，未修复 b；新增 c」，首次审查只显示「新增 N」；返工卡显示 `addressed`。`/classic` 和 `/v1` 把 `blocking` 的元素按字符串或对象归一显示。
+
+### 25.5 共享工作区
+
+- 路径是 `.bridge/shared/<run.id>/<task.id>/`，两段都用数字 id，避开 Windows 保留名和大小写冲突。
+- `readTaskMail` 在把 attempt 改成 `in_progress` 之前幂等创建这个目录。所有任务信的顶层带相对路径 `shared_dir`；创建失败时带 `shared_dir_error`，但不阻断取信。
+- 同一任务的实现和审查共用一份；任务打回、结束、桥重启都保留，0.11 不自动清理。
+- `.bridge/.gitignore` 已经排除整个 `.bridge/`，自动提交不会带上目录里的脚本和样例。
+- 确认某个运行彻底结束、脚本和样例不需要留档后，手动删除 `.bridge/shared/<run.id>/`；0.12 再考虑命令或面板入口。
+
+### 25.6 默认审查说明
+
+`src/config.ts` 导出 `DEFAULT_REVIEW_INSTRUCTIONS`；`DEFAULT_TASK_TEMPLATE`、`DEFAULT_CONFIG_YAML` 的流水线和任务模板都引用它，`bridge.config.example.yaml` 与本仓库的 `bridge.config.yaml` 保持同样的文字。内容要求首次审查跑完验收和相关回归、一次列全问题；每个阻塞问题写进 `issues`，能复现的附 `repro`，脚本放 `shared_dir`；复审先逐条写 `rechecks`，新问题写 `late_reason`；不影响通过的建议写 `observations`。`turnPayload` 对审查阶段的说明做去重：阶段自己的 `instructions` 不含 `verdict` 时补上 verdict 要求；若也不含 `DEFAULT_REVIEW_INSTRUCTIONS`，再补通用审查说明。
+
+### 25.7 兼容与测试
+
+- 0.10.1 的数据库不需要迁移：`parseFeedback` 把字符串 `blocking` 读成 `{ id: null, problem }`；没有编号的旧项不参与 `rechecks` 必答，也不能在 `addressed` 里引用，复审认为仍是阻塞时按新问题重新提出。
+- smoke 覆盖两次打回、只传旧 `review_comments`、漏答/重复/未知编号、矛盾 verdict、返工自查的软提示，以及被拒提交前后 HEAD、交接数、attempt 状态和信件状态不变；另有 0.10.1 旧数据夹具验证人工批准 reject 审查后的豁免和不追溯补号。共享目录的检查覆盖目录存在、同任务各阶段路径一致、并行任务各用各的目录、目录内文件不进自动提交。

@@ -1,6 +1,6 @@
 {
   "name": "ai-bridge",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "本地 AI 协作桥：让 Claude、Codex 等桌面端 AI 通过 MCP 信箱与门铃接力完成同一个项目",
   "repository": {
     "type": "git",
