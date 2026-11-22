@@ -9,6 +9,18 @@ function planTable(tasks, final) {
       "</td><td>" + esc(t.paths.join("、") || "—") + "</td></tr>").join("") + "</tbody></table></div>";
 }
 
+function planPreview(preview) {
+  if (!preview) return "";
+  const waves = preview.waves.map(({ n, items }) => '<tr><th scope="row">第 ' + esc(n) + ' 波</th><td>' +
+    esc(items.map(({ task, stage, agent }) => task + " " + stage + "（" + agent + "）").join("、")) + "</td></tr>").join("");
+  return '<section aria-label="并行预览"><h4>并行预览</h4><p class="muted">共 ' + esc(preview.total_units) +
+    ' 波，审批等待和返工不计入估算。</p>' +
+    list(preview.hints.map(({ text }) => text)) +
+    '<div class="table-wrap" tabindex="0" aria-label="任务分波"><table><thead><tr><th scope="col">波次</th>' +
+    '<th scope="col">任务与阶段</th></tr></thead><tbody>' + waves + '</tbody></table></div>' +
+    list(preview.members.map(({ agent, work, review }) => `${agent}（实现 ${work}，审查 ${review}）`)) + '</section>';
+}
+
 function speaker(id, turn, agents, final, full) {
   let body = '<p class="muted">等待发言</p>';
   if (turn) {
@@ -22,6 +34,7 @@ function speaker(id, turn, agents, final, full) {
       const table = planTable(turn.tasks, final);
       body += final ? table : details("plan-" + id, "查看任务草案", table);
     }
+    if (final) body += planPreview(turn.preview);
   }
   return '<section class="speech ' + memberColor(id) + (turn ? '' : ' waiting') + '"><div class="speaker-head">' + avatar(id, agents) + "<strong>" + esc(id) + "</strong>" +
     timeTag(turn?.at) + "</div>" + body + "</section>";
@@ -58,7 +71,7 @@ export function speakersFor(round, agents, full = false) {
 export function roundCard(round, agents, { anchor, folder = false, topic = false, showSpeakers = true } = {}) {
   const heading = "第 " + round.round + " 轮 · " + roundKind[round.kind];
   const waiting = waitingSpeakers(round);
-  const speakers = showSpeakers ? speakersFor(round, agents, folder) : "";
+  const speakers = showSpeakers ? speakersFor(round, agents, folder) : planPreview(round.turns.find((turn) => turn.preview)?.preview);
   const note = round.note ? '<p class="round-note prose"><strong>本轮意见</strong> ' + esc(round.note) + "</p>" : "";
   const minutes = round.doc_path ? '<p class="muted">会议纪要 <code>' + esc(round.doc_path) + "</code></p>" : "";
   const body = note + speakers + minutes;

@@ -161,7 +161,7 @@ export class Room {
         facilitator: m.facilitator,
         round,
         kind: ts[0].kind,
-        turns: ts.map((t) => ({ agent: t.agent, at: t.created_at, content: t.content, decisions: t.decisions, tasks: t.tasks })),
+        turns: ts.map((t) => ({ agent: t.agent, at: t.created_at, content: t.content, decisions: t.decisions, tasks: t.tasks, preview: t.preview })),
         // Controls on the current round: what the human can do now.
         status: current ? m.status : null,
         expected: current ? this.meetings.expectedSpeakers(m) : null,

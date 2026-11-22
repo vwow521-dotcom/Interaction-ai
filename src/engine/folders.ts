@@ -173,7 +173,7 @@ export class Folders {
         expected: current && open ? this.meetings.expectedSpeakers(meeting) : [],
         note: current ? meeting.round_note : null,
         turns: turns.map((turn) => full
-          ? { agent: turn.agent, at: turn.created_at, content: turn.content, tasks: turn.tasks, decisions: turn.decisions }
+          ? { agent: turn.agent, at: turn.created_at, content: turn.content, tasks: turn.tasks, decisions: turn.decisions, preview: turn.preview }
           : { agent: turn.agent, at: turn.created_at, summary: summarizeTurn(turn.content) }),
       };
     });

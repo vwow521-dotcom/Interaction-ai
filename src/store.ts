@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { PlanPreview } from "./engine/plan-preview.js";
 
 export type RunStatus = "active" | "awaiting_approval" | "done" | "stopped";
 export type AttemptStatus = "ready" | "in_progress" | "awaiting_approval" | "approved" | "rejected" | "done" | "cancelled";
@@ -106,6 +107,7 @@ export interface MeetingTurn {
   content: string;
   tasks: PlannedTask[] | null;
   decisions: { what: string; why: string }[];
+  preview?: PlanPreview;
   created_at: string;
 }
 
@@ -374,7 +376,7 @@ export class Store {
         run_id INTEGER, doc_path TEXT, created_at TEXT NOT NULL, ended_at TEXT);
       CREATE TABLE IF NOT EXISTS meeting_turns (
         id INTEGER PRIMARY KEY, meeting_id INTEGER NOT NULL, round INTEGER NOT NULL, kind TEXT NOT NULL, agent TEXT NOT NULL,
-        content TEXT NOT NULL, tasks TEXT, decisions TEXT, created_at TEXT NOT NULL);
+        content TEXT NOT NULL, tasks TEXT, decisions TEXT, preview TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chat_messages (
         id INTEGER PRIMARY KEY, from_agent TEXT NOT NULL, text TEXT NOT NULL, mentions TEXT NOT NULL,
         reply_to INTEGER, run_id INTEGER, meeting_id INTEGER, created_at TEXT NOT NULL);
@@ -385,6 +387,7 @@ export class Store {
     if (!cols("attempts").includes("task_id")) this.db.exec("ALTER TABLE attempts ADD COLUMN task_id INTEGER");
     if (!cols("runs").includes("meeting_id")) this.db.exec("ALTER TABLE runs ADD COLUMN meeting_id INTEGER");
     if (!cols("tasks").includes("dep_basis")) this.db.exec("ALTER TABLE tasks ADD COLUMN dep_basis TEXT");
+    if (!cols("meeting_turns").includes("preview")) this.db.exec("ALTER TABLE meeting_turns ADD COLUMN preview TEXT");
     if (!cols("events").includes("meeting_id")) this.addEventMeetingIds();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS events_run ON events (run_id, created_at);
@@ -710,13 +713,17 @@ export class Store {
   }
   addMeetingTurn(t: Omit<MeetingTurn, "id" | "created_at">) {
     return this.insert(
-      "INSERT INTO meeting_turns (meeting_id, round, kind, agent, content, tasks, decisions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      t.meeting_id, t.round, t.kind, t.agent, t.content, t.tasks ? JSON.stringify(t.tasks) : null, JSON.stringify(t.decisions), now(),
+      "INSERT INTO meeting_turns (meeting_id, round, kind, agent, content, tasks, decisions, preview, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      t.meeting_id, t.round, t.kind, t.agent, t.content, t.tasks ? JSON.stringify(t.tasks) : null,
+      JSON.stringify(t.decisions), t.preview ? JSON.stringify(t.preview) : null, now(),
     );
   }
   meetingTurns(meeting_id: number): MeetingTurn[] {
     return this.all<any>("SELECT * FROM meeting_turns WHERE meeting_id = ? ORDER BY round, id", meeting_id).map(
-      (r): MeetingTurn => ({ ...r, tasks: r.tasks ? JSON.parse(r.tasks) : null, decisions: r.decisions ? JSON.parse(r.decisions) : [] }),
+      (r): MeetingTurn => ({
+        ...r, tasks: r.tasks ? JSON.parse(r.tasks) : null, decisions: r.decisions ? JSON.parse(r.decisions) : [],
+        preview: r.preview ? JSON.parse(r.preview) : undefined,
+      }),
     );
   }
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import { commitPaths, globsOverlap, normGlob } from "../git.js";
 import type { Mail, Meeting, MeetingTurnKind, PlannedTask } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
+import { previewPlan, type PlanPreview } from "./plan-preview.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
 import type { Scheduler } from "./scheduler.js";
@@ -60,14 +61,16 @@ export class Meetings {
             ownSummarized = true;
             return { agent: t.agent, yours: true, summary: summarizeTurn(t.content) };
           }
-          return { agent: t.agent, content: t.content, tasks: t.tasks ?? undefined, decisions: t.decisions.length ? t.decisions : undefined };
+          return { agent: t.agent, content: t.content, tasks: t.tasks ?? undefined, decisions: t.decisions.length ? t.decisions : undefined, preview: t.preview };
         }),
       });
     }
     const taskSpec =
       "tasks 是任务清单，每项：id（如 T1）、title、description（要做什么、验收标准）、owner（负责人，可选：" +
       this.presence.agentIds().join("、") +
-      "）、reviewer（审查人，可选，留空则不审查）、depends_on（依赖的任务 id）、paths（预计改动的文件 glob，例如 src/ui/**；并行任务的 paths 不要重叠，桥按它分配文件租约）。";
+      "）、reviewer（审查人，可选，留空则不审查）、" +
+      "depends_on（T1 等整项完成，T1@implement 等该阶段的合格交接；阶段须在上游实际存在，同一上游只写一项，依赖不能成环。阶段依赖双方都要声明互不重叠的 paths）、" +
+      "paths（预计改动的文件 glob，例如 src/ui/**；桥按它分配文件租约）。";
     const guide: Record<MeetingTurnKind, string> = {
       proposal:
         "这是第 1 轮：提案。独立给出你的方案：思路、关键决策和理由、风险。可以附一份任务拆分草案（tasks，可选）。先读项目代码再提案，不要改任何文件。",
@@ -76,7 +79,7 @@ export class Meetings {
       final:
         "这是定稿轮，由你负责。综合各轮讨论写出最终方案（content）、关键决策（decisions，每项 what + why）和任务清单（tasks，必填）。" +
         "分配负责人时参考 members[].notes。" +
-        "任务之间能并行就并行，有先后关系的用 depends_on 表示；尽量让每个任务的 paths 互不重叠。不要改任何文件。",
+        "两位主力尽量各领一个可同时开工的实现任务，并交叉审查。有先后关系的用 depends_on 表示，尽量让可并行的任务文件范围互不重叠。不要改任何文件。",
     };
     const planning = m.round_kind === "proposal" || m.round_kind === "final";
     return {
@@ -159,6 +162,8 @@ export class Meetings {
       if (!t.title?.trim()) errs.push(`${t.id}：title 不能为空。`);
       if (!this.presence.isAgent(t.owner)) errs.push(`${t.id}：owner「${t.owner}」不是成员（可选：${this.presence.agentIds().join("、")}）。`);
       if (t.reviewer && !this.presence.isAgent(t.reviewer)) errs.push(`${t.id}：reviewer「${t.reviewer}」不是成员。`);
+      if (!this.scheduler.templateStages(t.owner, t.reviewer ?? null).length)
+        errs.push(`${t.id}：任务模板没有可执行的阶段，请指定审查人或调整任务模板。`);
     }
     const graph = new Map<string, string[]>();
     for (const task of tasks) {
@@ -240,11 +245,14 @@ export class Meetings {
     if (turns.some((t) => t.round === m.round && t.agent === agent)) return err(`第 ${m.round} 轮你已经发过言了。`);
     if (!content.trim()) return err("content 不能为空。");
     const planned = tasks?.map((t) => ({ ...t, depends_on: t.depends_on ?? [], paths: t.paths ?? [], description: t.description ?? "", reviewer: t.reviewer || null }));
+    let preview: PlanPreview | undefined;
     if (m.round_kind === "final") {
-      const problems = this.validatePlan(planned ?? []);
+      const plan = planned ?? [];
+      const problems = this.validatePlan(plan);
       if (problems.length) return { error: "任务清单有问题，请修改后重新提交。", problems };
+      preview = previewPlan(plan, (t) => this.scheduler.templateStages(t.owner, t.reviewer ?? null), m.participants);
     }
-    this.ctx.store.addMeetingTurn({ meeting_id: m.id, round: m.round, kind: m.round_kind, agent, content: content.trim(), tasks: planned ?? null, decisions });
+    this.ctx.store.addMeetingTurn({ meeting_id: m.id, round: m.round, kind: m.round_kind, agent, content: content.trim(), tasks: planned ?? null, decisions, preview });
     this.ctx.store.setMailStatus([this.meetingMailId(m.id, m.round, agent)], "acked");
     this.presence.markReturned(agent);
     this.ctx.log("meeting_turn", { meeting: m.id, round: m.round, kind: m.round_kind, agent, tasks: planned?.length ?? 0 });
@@ -264,7 +272,7 @@ export class Meetings {
       }
     }
     const after = this.presence.doorbellKind(agent) === "poll" ? "立即调用 wait_for_mail 等信。" : "可以结束本回合了，下一轮开始时会叫醒你。";
-    return { status: "submitted", round: m.round, waiting_for: this.expectedSpeakers(m).filter((a) => !spoken.has(a)), instructions: "已发言。" + after };
+    return { status: "submitted", round: m.round, waiting_for: this.expectedSpeakers(m).filter((a) => !spoken.has(a)), preview, instructions: "已发言。" + after };
   }
 
   /** Human: open the next round (another critique, or the final plan). Allowed while some are still silent. */
