@@ -20,8 +20,8 @@ interface Fixture {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until<T>(read: () => T | Promise<T>, description: string): Promise<NonNullable<T>> {
-  const deadline = Date.now() + 15_000;
+async function until<T>(read: () => T | Promise<T>, description: string, timeoutMs = 15_000): Promise<NonNullable<T>> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const result = await read();
     if (result) return result;
@@ -264,7 +264,8 @@ export async function smokeAcp({ root, base, codexEnv, startDaemon, stopDaemon, 
   const stopped = await until(async () => {
     const worker = await member("fault");
     return worker.acp.state === "stopped" ? worker : null;
-  }, "three process failures did not stop automatic retry");
+    // Three spawns, each with supervisor start and PowerShell identity recording (~2 s, more under load), plus two retry waits.
+  }, "three process failures did not stop automatic retry", 45_000);
   const failures = bridgeEvents("fault", "acp_exit");
   check(failures.map((row) => row.failures).join(",") === "1,2,3"
     && failures[0].retryAt && failures[1].retryAt && failures[2].retryAt === undefined
