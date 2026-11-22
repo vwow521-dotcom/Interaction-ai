@@ -42,6 +42,8 @@ pipeline:
     instructions: 首次审查要一次列全：先跑完验收标准和相关回归再下结论。每个阻塞问题写进 issues，能复现的附 repro（command、expect，需要时写 cwd），复现用的脚本放在 shared_dir。复审时先对 feedback.blocking 逐条写 rechecks，再提新问题，新问题要写 late_reason。不影响通过的建议写进 observations。
 # task_template: 会议定稿后，每个任务按这组阶段走。agent 写 owner（任务负责人）、reviewer（任务审查人）或固定的身份。
 # 没有审查人的任务会跳过 agent 为 reviewer 的阶段。
+# 定稿的 depends_on 可以写 T1（等 T1 完成）或 T1@implement（等 T1 这一阶段交接）；@ 后面写这里的 stage id。
+# 带 on_reject 的阶段算审查：成员同时有待领取的实现和审查时，先发审查。
 task_template:
   - id: implement
     role: 实现
@@ -66,6 +68,7 @@ mail:
   ring_retry_seconds: 120     # 按了门铃但没来取信 → 隔这么久再按
   max_rings: 3                # 按这么多次仍没反应 → 通知你去叫醒它
   ack_timeout_seconds: 600    # 取走需要确认的信后这么久没确认 → 标红并通知你
+                              # 成员用 report_progress 的 busy_minutes 报了长命令时，到期前不报
 doorbells:
   max_unconfirmed_rings: 3    # 可验证门铃连续未确认多少次后暂时降级
   cooldown_seconds: 600       # 降级多久后重新尝试该门铃
