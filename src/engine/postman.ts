@@ -334,6 +334,8 @@ export class Postman {
       if (!m.ack_required || m.overdue_flagged || now - Date.parse(m.fetched_at!) < ackTimeout) continue;
       if (m.kind === "task" && m.attempt_id && this.ctx.store.attempt(m.attempt_id)?.status === "in_progress"
         && now - (this.presence.get(m.to_agent)?.lastSeenAt ?? 0) <= ackTimeout) continue;
+      // report_progress(busy_minutes): the agent said it runs a long command for this very attempt.
+      if (m.kind === "task" && m.attempt_id && this.presence.busy(m.to_agent)?.attemptId === m.attempt_id) continue;
       this.ctx.store.flagOverdue(m.id);
       this.ctx.log("ack_overdue", { id: m.id, to: m.to_agent });
       this.ctx.event(m.run_id, m.to_agent, "overdue", `${m.to_agent} 取走了「${m.subject}」但一直没有确认`);

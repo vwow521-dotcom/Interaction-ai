@@ -1640,6 +1640,7 @@ notify: { enabled: false }
   await smokeMemberNotes({ base: BASE, startDaemon, stopDaemon, api, call, check });
   // Runs its own daemons on the same port, so the fixture daemon must be stopped first.
   await stopDaemon();
+  await (await import("./busy-smoke.js")).smokeBusy({ base: BASE, startDaemon, stopDaemon, api, call, check });
   await smokeAcpProcess({ root: ROOT, port: PORT, check });
 } catch (e) {
   console.error(e);

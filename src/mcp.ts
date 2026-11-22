@@ -177,10 +177,18 @@ export function buildServer(engine: Engine, client: BridgeClient, acpAgent?: str
     "report_progress",
     {
       title: "汇报进度",
-      description: "工作中途汇报一句进度，用户会在面板上实时看到。不会改变阶段状态。",
-      inputSchema: { agent_id: agentId, text: z.string().describe("一句话进度") },
+      description:
+        "工作中途汇报一句进度，用户会在面板上实时看到。不会改变阶段状态。" +
+        "预计超过 5 分钟不调用桥工具时（比如跑完整 smoke），先 report_progress 并带上 busy_minutes：期间桥不会报确认超时，面板显示「正在执行长命令」。" +
+        "时长从这次汇报算起，只对你正在进行的阶段有效；再次汇报会覆盖，不带 busy_minutes 的汇报会清除它，交接成功后自动失效。",
+      inputSchema: {
+        agent_id: agentId,
+        text: z.string().describe("一句话进度"),
+        busy_minutes: z.number().int().min(1).max(60).optional().describe("可选：预计多少分钟内不调用桥工具（1 到 60 的整数）"),
+      },
     },
-    async ({ agent_id, text: t }, extra) => withAgent(agent_id, extra.sessionId, () => engine.workspace.reportProgress(agent_id, extra.sessionId, t)),
+    async ({ agent_id, text: t, busy_minutes }, extra) =>
+      withAgent(agent_id, extra.sessionId, () => engine.workspace.reportProgress(agent_id, extra.sessionId, t, busy_minutes)),
   );
 
   server.registerTool(
@@ -259,7 +267,10 @@ export function buildServer(engine: Engine, client: BridgeClient, acpAgent?: str
     description: z.string().default("").describe("要做什么、验收标准"),
     owner: z.string().describe(`负责人，可选：${ids}`),
     reviewer: z.string().nullable().optional().describe("审查人（可选，留空则不审查）"),
-    depends_on: z.array(z.string()).default([]).describe("依赖的任务编号"),
+    depends_on: z.array(z.string()).default([]).describe(
+      "依赖：写 T1 表示等 T1 整个任务完成；写 T1@implement 表示 T1 的该阶段一有交接就可以开工（阶段须是 T1 实际会有的，" +
+      "例如 T1 没有审查人时不能写 @review；两者会同时进行，所以双方都要写 paths 且不能重叠）。同一上游只写一项",
+    ),
     paths: z.array(z.string()).default([]).describe("预计改动的文件 glob，如 src/ui/**；并行任务之间不要重叠"),
   });
 

@@ -10,6 +10,10 @@ const permissionLabel = {
   allow_once: "允许一次", allow_always: "始终允许", reject_once: "拒绝一次", cancelled: "取消",
 };
 
+// report_progress(busy_minutes): shown until the period ends (the server sends a fresh snapshot when it does).
+const busyLine = (activity) => activity.busy_until && Date.parse(activity.busy_until) > Date.now()
+  ? '<p class="ev prose busy">正在执行长命令，预计 ' + esc(time(activity.busy_until)) + " 前</p>" : "";
+
 export function renderOffice(snapshot) {
   const { agents, meeting, timeline } = snapshot;
   const ids = agents.map((a) => a.id);
@@ -20,7 +24,7 @@ export function renderOffice(snapshot) {
     const detail = a.diagnostics?.length || ["unreachable", "stale", "offline", "never-joined"].includes(activity.state) ? "查看异常" : "成员详情";
     return `<article class="desk st-${esc(sceneKey(a))}" id="member-${esc(a.id)}" tabindex="-1">
       <div class="scene" aria-hidden="true">${icon}</div><div class="info">
-      <div class="nm">${who(a.id, ids)}${pill(activity.label, tone)}</div><p class="ev prose">${esc(activity.evidence)}</p>
+      <div class="nm">${who(a.id, ids)}${pill(activity.label, tone)}</div><p class="ev prose">${esc(activity.evidence)}</p>${busyLine(activity)}
       ${a.acp ? '<p class="ev prose">后台（ACP） · ' + esc(acpLabel[a.acp.state]) +
         (a.acp.retryAt ? ' · ' + esc(time(a.acp.retryAt)) : a.acp.reason ? ' · ' + esc(a.acp.reason) : '') + '</p>' : ""}
       <div class="acts">
@@ -86,7 +90,7 @@ export function renderMemberDetails(agent, ids, delivery) {
   rows(container, [{
     key: id, className: "card diagnostics",
     heading: '<div class="station-title">' + avatar(id, ids) + "<h3>" + esc(id) + "</h3>" + label(activity.label) + "</div>" +
-      '<p class="prose">' + esc(activity.evidence) + "</p>" +
+      '<p class="prose">' + esc(activity.evidence) + "</p>" + busyLine(activity) +
       (product?.warning ? '<p class="notice">' + esc(product.warning) + "</p>" : "") +
       (delivery ? '<p class="notice">' + esc(delivery.message) + "</p>" : ""),
     control: buttons ? { buttons } : undefined,

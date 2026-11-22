@@ -3,6 +3,9 @@ import type { Doorbells, DoorbellKind } from "../doorbells/index.js";
 import type { BridgeClient } from "../products/types.js";
 import { err, type EngineContext, type Result } from "./context.js";
 
+// Length of one busy_minutes minute. Only the smoke test shortens it.
+const BUSY_MINUTE_MS = Number(process.env.BRIDGE_BUSY_MINUTE_MS) || 60_000;
+
 export type PresenceStatus = "working" | "armed" | "waiting" | "idle" | "stale" | "offline" | "never-joined";
 
 interface AgentPresence {
@@ -17,6 +20,8 @@ interface AgentPresence {
   // caused a ring and a new call after it can share a millisecond.
   callSeq: number;
   doorbellError?: string;
+  // report_progress(busy_minutes): a long command is running for this attempt in this binding (in memory only).
+  busy?: { attemptId: number; sessionId: string; until: number; timer: ReturnType<typeof setTimeout> };
   lastRingAt?: number;
   lastRingKind?: DoorbellKind;
   // wait_for_mail (poll fallback) metrics, kept from M0
@@ -60,6 +65,36 @@ export class Presence {
     if (!p) return;
     p.lastSeenAt = Date.now();
     p.callSeq++;
+  }
+
+  /** report_progress(busy_minutes): no ack_overdue for this attempt's task mail until `until`. Replaces any earlier period. */
+  setBusy(agent: string, attemptId: number, minutes: number) {
+    const p = this.agents.get(agent)!;
+    this.clearBusy(agent);
+    const until = Date.now() + minutes * BUSY_MINUTE_MS;
+    // Lets the panel drop the "long command" line when the period ends, without waiting for another change.
+    const timer = setTimeout(() => this.busy(agent) ?? this.ctx.onChange(), until - Date.now() + 50);
+    timer.unref?.();
+    p.busy = { attemptId, sessionId: p.sessionId!, until, timer };
+    return until;
+  }
+
+  clearBusy(agent: string) {
+    const p = this.agents.get(agent);
+    if (!p?.busy) return;
+    clearTimeout(p.busy.timer);
+    p.busy = undefined;
+  }
+
+  /** The live busy period, if any: same binding, not expired, and its attempt still in progress. Otherwise it is cleared. */
+  busy(agent: string): { attemptId: number; until: number } | undefined {
+    const p = this.agents.get(agent);
+    const b = p?.busy;
+    if (!b) return undefined;
+    if (b.sessionId === p.sessionId && Date.now() < b.until && this.ctx.store.attempt(b.attemptId)?.status === "in_progress")
+      return { attemptId: b.attemptId, until: b.until };
+    this.clearBusy(agent);
+    return undefined;
   }
 
   markReturned(agent: string) {
@@ -133,6 +168,7 @@ export class Presence {
 
   private bind(p: AgentPresence, sessionId: string | undefined) {
     if (p.sessionId !== sessionId) {
+      this.clearBusy(p.id);
       p.boundAt = Date.now();
       p.client = undefined;
       p.lastPollAt = undefined;
@@ -224,7 +260,7 @@ export class Presence {
       protocol: [
         "如果协作桥工具是延迟加载的，先用一次工具搜索（如 ToolSearch）同时加载 submit_handoff、submit_meeting_turn、fetch_inbox、ack、say 和 report_progress。",
         "1. 现在先调用一次 fetch_inbox(agent_id)，处理里面的信。",
-        "2. task 信：按其中的 task、stage、input_handoff 和 feedback 完成本阶段工作；需要更多背景时调用 get_context；可用 report_progress 汇报进度、post_note 记录共享约定、ask_human 向用户提问（答复会以信件送达）。完成后调用 submit_handoff（桥会自动 git 提交并确认这封信）。",
+        "2. task 信：按其中的 task、stage、input_handoff 和 feedback 完成本阶段工作；需要更多背景时调用 get_context；可用 report_progress 汇报进度（预计超过 5 分钟不调用桥工具时，比如跑完整 smoke，先 report_progress 并带上 busy_minutes）、post_note 记录共享约定、ask_human 向用户提问（答复会以信件送达）。完成后调用 submit_handoff（桥会自动 git 提交并确认这封信）。",
         "3. meeting 信：这是会议的一轮发言（提案 / 互评 / 定稿），按其中的 meeting.instructions 发言，然后调用 submit_meeting_turn（自动确认这封信）。",
         "4. 多个任务并行时，桥已为每个任务租下它的 paths。要改本任务 paths 以外的文件，先调用 reserve_paths；冲突时它会告诉你谁占着，不要硬改。",
         "5. chat 信：用户或其他成员在聊天里找你，不需要 ack；需要回答时调用 say（带 reply_to），回答要简短。其他 ack_required 的信：处理完调用 ack。需要正式找其他成员时用 send_mail。",
@@ -241,6 +277,7 @@ export class Presence {
       if (p.sessionId === sessionId) {
         p.sessionId = undefined;
         p.canRecover = true;
+        this.clearBusy(p.id);
         this.callbacks.wakeWaiter(p.id);
         this.doorbells.claudeSocket.disarm(p.id);
         this.ctx.log("agent_unbound", { agent: p.id, session: sessionId });
@@ -260,6 +297,7 @@ export class Presence {
     this.ctx.store.setResumeKey(agent);
     p.sessionId = undefined;
     p.canRecover = false;
+    this.clearBusy(agent);
     this.callbacks.wakeWaiter(agent);
     this.doorbells.claudeSocket.disarm(agent);
     this.ctx.log("identity_released", { agent, by, session: old });

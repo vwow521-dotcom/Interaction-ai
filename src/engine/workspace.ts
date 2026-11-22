@@ -58,13 +58,21 @@ export class Workspace {
     };
   }
 
-  reportProgress(agent: string, sessionId: string | undefined, text: string): Result {
+  reportProgress(agent: string, sessionId: string | undefined, text: string, busyMinutes?: number): Result {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
     const run = this.ctx.store.openRun();
-    this.ctx.log("progress", { agent, text });
-    this.ctx.event(run?.id ?? null, agent, "progress", text);
-    return { ok: true };
+    let busyUntil: number | undefined;
+    if (busyMinutes !== undefined) {
+      if (!Number.isInteger(busyMinutes) || busyMinutes < 1 || busyMinutes > 60) return err("busy_minutes 必须是 1 到 60 的整数分钟。");
+      const attempt = run && this.ctx.store.agentAttempts(run.id, agent, ["in_progress"])[0];
+      if (!attempt) return err("busy_minutes 只能在你领取了任务、正在进行某个阶段时使用。这次汇报没有记录，请去掉 busy_minutes 再汇报。");
+      busyUntil = this.presence.setBusy(agent, attempt.id, busyMinutes);
+    } else this.presence.clearBusy(agent);
+    const until = busyUntil === undefined ? undefined : new Date(busyUntil).toISOString();
+    this.ctx.log("progress", { agent, text, busyUntil: until });
+    this.ctx.event(run?.id ?? null, agent, "progress", text + (busyMinutes ? `（执行长命令，预计 ${busyMinutes} 分钟）` : ""));
+    return until ? { ok: true, busy_until: until } : { ok: true };
   }
 
   postNote(agent: string, sessionId: string | undefined, topic: string, text: string): Result {
@@ -220,7 +228,7 @@ export class Workspace {
         activity: activityFor({
           id, status, lastSeen: lastSeenAt,
           attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
-          failedWake, acpActivity: acp?.activity,
+          failedWake, acpActivity: acp?.activity, busy: this.presence.busy(id),
           meeting: owesTurn ? {
             meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),
           } : undefined,

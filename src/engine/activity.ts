@@ -10,6 +10,7 @@ interface Activity {
   evidence: string;
   since: string | null;
   link: PanelTarget;
+  busy_until: string | null; // report_progress(busy_minutes) for the stage in progress; the panel renders it in local time
 }
 
 const LABEL: Record<Activity["state"], string> = {
@@ -47,8 +48,9 @@ export function activityFor(input: {
   delivery?: DeliveryNotice;
   failedWake?: FailedWake;
   acpActivity?: { evidence: string; since: string } | null;
+  busy?: { attemptId: number; until: number };
 }): Activity {
-  const { id, status, lastSeen, attempts, tasks, handoffs, template, meeting, delivery, failedWake, acpActivity } = input;
+  const { id, status, lastSeen, attempts, tasks, handoffs, template, meeting, delivery, failedWake, acpActivity, busy } = input;
   const member: PanelTarget = { view: "office", anchor: `member-${id}` };
   const taskLabel = (a: Attempt) => {
     const task = tasks.find((t) => t.id === a.task_id);
@@ -57,8 +59,8 @@ export function activityFor(input: {
   };
   const taskLink = (a: Attempt): PanelTarget => ({ view: "meeting", anchor: `task-${a.task_id}` });
   const ready = attempts.find((a) => a.status === "ready");
-  const result = (state: Activity["state"], evidence: string, since: string | null, link = member): Activity => ({
-    state, label: LABEL[state], evidence: ready ? `${evidence}。有任务待领取（${taskLabel(ready)}）` : evidence, since, link,
+  const result = (state: Activity["state"], evidence: string, since: string | null, link = member, busyUntil: string | null = null): Activity => ({
+    state, label: LABEL[state], evidence: ready ? `${evidence}。有任务待领取（${taskLabel(ready)}）` : evidence, since, link, busy_until: busyUntil,
   });
 
   if (delivery?.reason === "stuck" || delivery?.reason === "unanswered")
@@ -84,7 +86,8 @@ export function activityFor(input: {
   if (active) {
     const review = isReview(active, tasks.find((t) => t.id === active.task_id), template);
     return result(review ? "reviewing" : "working", acpActivity?.evidence ?? `已领取阶段 #${active.id}（${taskLabel(active)}）`,
-      acpActivity?.since ?? active.started_at ?? active.assigned_at, taskLink(active));
+      acpActivity?.since ?? active.started_at ?? active.assigned_at, taskLink(active),
+      busy?.attemptId === active.id ? new Date(busy.until).toISOString() : null);
   }
   if (acpActivity) return result("working", acpActivity.evidence, acpActivity.since);
   if (status === "working") return result("unknown", "有工作状态记录，当前没有可定位的阶段或待发言轮次", lastSeen);
