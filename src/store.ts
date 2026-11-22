@@ -29,6 +29,13 @@ export interface TaskStage {
 
 export type TaskStatus = "pending" | "active" | "done" | "cancelled";
 
+export interface DependencyBasis {
+  dep: string;
+  stage: string;
+  handoff_id: number;
+  commit: string | null;
+}
+
 /** One node of a run's task DAG. A pipeline run has exactly one task (T1) whose stages are the config pipeline. */
 export interface Task {
   id: number;
@@ -38,7 +45,8 @@ export interface Task {
   description: string;
   owner: string;
   reviewer: string | null;
-  depends_on: string[]; // task keys
+  depends_on: string[]; // task keys or task@stage
+  dep_basis?: DependencyBasis[];
   paths: string[]; // globs leased while the task is active
   stages: TaskStage[];
   status: TaskStatus;
@@ -156,9 +164,10 @@ export interface HandoffData {
   issues?: Issue[];
   rechecks?: Recheck[];
   addressed?: Addressed[];
+  based_on?: DependencyBasis[];
 }
 
-export type HandoffSubmission = Omit<HandoffData, "issues" | "rechecks"> & {
+export type HandoffSubmission = Omit<HandoffData, "issues" | "rechecks" | "based_on"> & {
   issues?: Omit<Issue, "id" | "added_in_recheck">[];
   rechecks?: Omit<Recheck, "issue">[];
 };
@@ -352,7 +361,7 @@ export class Store {
         agent TEXT PRIMARY KEY, key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, key TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
-        owner TEXT NOT NULL, reviewer TEXT, depends_on TEXT NOT NULL, paths TEXT NOT NULL, stages TEXT NOT NULL,
+        owner TEXT NOT NULL, reviewer TEXT, depends_on TEXT NOT NULL, paths TEXT NOT NULL, stages TEXT NOT NULL, dep_basis TEXT,
         status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT);
       CREATE TABLE IF NOT EXISTS task_baselines (
         task_id INTEGER PRIMARY KEY, paths TEXT NOT NULL);
@@ -375,6 +384,7 @@ export class Store {
     if (!cols("handoffs").includes("scope_notes")) this.db.exec("ALTER TABLE handoffs ADD COLUMN scope_notes TEXT");
     if (!cols("attempts").includes("task_id")) this.db.exec("ALTER TABLE attempts ADD COLUMN task_id INTEGER");
     if (!cols("runs").includes("meeting_id")) this.db.exec("ALTER TABLE runs ADD COLUMN meeting_id INTEGER");
+    if (!cols("tasks").includes("dep_basis")) this.db.exec("ALTER TABLE tasks ADD COLUMN dep_basis TEXT");
     if (!cols("events").includes("meeting_id")) this.addEventMeetingIds();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS events_run ON events (run_id, created_at);
@@ -534,7 +544,7 @@ export class Store {
   }
 
   // ---- tasks
-  createTask(run_id: number, t: Omit<Task, "id" | "run_id" | "status" | "created_at" | "started_at" | "ended_at">, status: TaskStatus = "pending"): Task {
+  createTask(run_id: number, t: Omit<Task, "id" | "run_id" | "status" | "created_at" | "started_at" | "ended_at" | "dep_basis">, status: TaskStatus = "pending"): Task {
     const id = this.insert(
       "INSERT INTO tasks (run_id, key, title, description, owner, reviewer, depends_on, paths, stages, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       run_id, t.key, t.title, t.description, t.owner, t.reviewer, JSON.stringify(t.depends_on), JSON.stringify(t.paths), JSON.stringify(t.stages), status, now(),
@@ -542,7 +552,10 @@ export class Store {
     return this.task(id)!;
   }
   private parseTask(r: any): Task {
-    return { ...r, depends_on: JSON.parse(r.depends_on), paths: JSON.parse(r.paths), stages: JSON.parse(r.stages) };
+    return {
+      ...r, depends_on: JSON.parse(r.depends_on), paths: JSON.parse(r.paths), stages: JSON.parse(r.stages),
+      dep_basis: r.dep_basis == null ? undefined : JSON.parse(r.dep_basis),
+    };
   }
   task(id: number): Task | undefined {
     const r = this.one<any>("SELECT * FROM tasks WHERE id = ?", id);
@@ -557,6 +570,10 @@ export class Store {
   taskBaseline(taskId: number): string[] {
     const row = this.one<{ paths: string }>("SELECT paths FROM task_baselines WHERE task_id = ?", taskId);
     return row ? JSON.parse(row.paths) : [];
+  }
+  activateTask(id: number, basis: DependencyBasis[]) {
+    this.exec("UPDATE tasks SET status = 'active', started_at = COALESCE(started_at, ?), dep_basis = ? WHERE id = ?",
+      now(), basis.length ? JSON.stringify(basis) : null, id);
   }
   setTaskStatus(id: number, status: TaskStatus) {
     const col = status === "active" ? "started_at" : status === "done" || status === "cancelled" ? "ended_at" : null;

@@ -1,12 +1,13 @@
 // Meeting rounds, plan validation and approval into a run.
 import fs from "node:fs";
 import path from "node:path";
-import { commitPaths, normGlob } from "../git.js";
+import { commitPaths, globsOverlap, normGlob } from "../git.js";
 import type { Mail, Meeting, MeetingTurnKind, PlannedTask } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
 import type { Scheduler } from "./scheduler.js";
+import { parseDependency } from "./stage-deps.js";
 
 export const KIND_LABEL: Record<MeetingTurnKind, string> = { proposal: "提案", critique: "互评", final: "定稿" };
 const sentences = new Intl.Segmenter("zh", { granularity: "sentence" });
@@ -150,22 +151,44 @@ export class Meetings {
   validatePlan(tasks: PlannedTask[]): string[] {
     const errs: string[] = [];
     if (!tasks.length) errs.push("tasks 不能为空。");
-    const ids = new Set<string>();
+    const byId = new Map<string, PlannedTask>();
     for (const t of tasks) {
       if (!/^[\w-]+$/.test(t.id ?? "")) errs.push(`任务 id「${t.id}」只能包含字母、数字、_ 和 -。`);
-      if (ids.has(t.id)) errs.push(`任务 id 重复：${t.id}`);
-      ids.add(t.id);
+      if (byId.has(t.id)) errs.push(`任务 id 重复：${t.id}`);
+      byId.set(t.id, t);
       if (!t.title?.trim()) errs.push(`${t.id}：title 不能为空。`);
       if (!this.presence.isAgent(t.owner)) errs.push(`${t.id}：owner「${t.owner}」不是成员（可选：${this.presence.agentIds().join("、")}）。`);
       if (t.reviewer && !this.presence.isAgent(t.reviewer)) errs.push(`${t.id}：reviewer「${t.reviewer}」不是成员。`);
     }
-    for (const t of tasks)
-      for (const d of t.depends_on ?? []) {
-        if (d === t.id) errs.push(`${t.id} 不能依赖自己。`);
-        else if (!ids.has(d)) errs.push(`${t.id} 依赖的「${d}」不在任务清单里。`);
+    const graph = new Map<string, string[]>();
+    for (const task of tasks) {
+      const edges: string[] = [];
+      graph.set(task.id, edges);
+      for (const dep of task.depends_on ?? []) {
+        const ref = parseDependency(dep);
+        const label = `${task.id} 的依赖「${dep}」`;
+        if (!ref) {
+          errs.push(`${label}格式错误，应写任务 ID 或任务ID@阶段ID。`);
+          continue;
+        }
+        if (ref.key === task.id) {
+          errs.push(`${label}指向自己。`);
+          continue;
+        }
+        const upstream = byId.get(ref.key);
+        if (!upstream) {
+          errs.push(`${label}引用的任务「${ref.key}」不在任务清单里。`);
+          continue;
+        }
+        if (edges.includes(ref.key)) {
+          errs.push(`${label}重复引用上游「${ref.key}」。`);
+          continue;
+        }
+        edges.push(ref.key);
+        if (ref.stage) this.validateStageDependency(label, ref.stage, task, upstream, errs);
       }
+    }
     // Cycle check (DFS).
-    const graph = new Map(tasks.map((t) => [t.id, t.depends_on ?? []]));
     const state = new Map<string, 1 | 2>();
     const visit = (id: string, trail: string[]): boolean => {
       if (state.get(id) === 2) return false;
@@ -180,6 +203,23 @@ export class Meetings {
     };
     for (const id of graph.keys()) if (visit(id, [])) break;
     return errs;
+  }
+
+  private validateStageDependency(label: string, stage: string, task: PlannedTask, upstream: PlannedTask, errs: string[]) {
+    const stages = this.scheduler.templateStages(upstream.owner, upstream.reviewer ?? null).map((s) => s.id);
+    if (!stages.includes(stage)) {
+      const missingReviewer = !upstream.reviewer && this.ctx.cfg.task_template.some((s) => s.agent === "reviewer" && s.id === stage);
+      const reason = missingReviewer ? `${upstream.id} 没有审查人，模板移除了阶段「${stage}」` : `上游不存在阶段「${stage}」`;
+      errs.push(`${label}：${reason}。可选阶段：${stages.join("、") || "无"}。`);
+    }
+    const from = (upstream.paths ?? []).map(normGlob).filter(Boolean);
+    const to = (task.paths ?? []).map(normGlob).filter(Boolean);
+    if (!from.length || !to.length) {
+      errs.push(`${label}要求上下游都声明有效的 paths。`);
+      return;
+    }
+    const conflicts = from.flatMap((a) => to.filter((b) => globsOverlap(a, b)).map((b) => `「${a}」与「${b}」`));
+    if (conflicts.length) errs.push(`${label}的上下游文件范围重叠：${conflicts.join("、")}。`);
   }
 
   submitMeetingTurn(

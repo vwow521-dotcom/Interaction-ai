@@ -1642,6 +1642,7 @@ notify: { enabled: false }
   await stopDaemon();
   await (await import("./busy-smoke.js")).smokeBusy({ base: BASE, startDaemon, stopDaemon, api, call, check });
   await smokeAcpProcess({ root: ROOT, port: PORT, check });
+  await (await import("./stage-deps-smoke.js")).smokeStageDeps({ root: ROOT, port: PORT, check });
 } catch (e) {
   console.error(e);
   failed = true;

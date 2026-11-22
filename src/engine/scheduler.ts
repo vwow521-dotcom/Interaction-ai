@@ -3,19 +3,31 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_REVIEW_INSTRUCTIONS } from "../config.js";
 import { changedFiles, commitAll, commitPaths, globMatch, normGlob, snapshotChangedFiles } from "../git.js";
-import type { Attempt, Feedback, HandoffData, HandoffSubmission, Issue, Lease, Mail, Run, Task, TaskStage } from "../store.js";
+import type { Attempt, DependencyBasis, Feedback, Handoff, HandoffData, HandoffSubmission, Issue, Lease, Mail, Run, Task, TaskStage } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import { checkAddressed, nextIssueNumber, openAfter, reviewComment, validateReview } from "./issues.js";
 import type { Leases } from "./leases.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
+import { parseDependency, rejectionAffectsStage, stageDependencyHandoff } from "./stage-deps.js";
 
 const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 const inGlob = (g: string, f: string) => globMatch(normGlob(g), f);
 
+type UpstreamEvent = { kind: "rework"; attempt: Attempt; reason: string }
+  | { kind: "change"; handoff: Handoff }
+  | { kind: "cancel"; reason: string };
+
+const upstreamMessage = {
+  rework: ["上游返工", "上游正在返工，新交接出来时会再通知你。你可以先处理不依赖该接口的部分。"],
+  change: ["上游变更", "请判断改动是否影响你的任务。需要跟进就修改，否则继续。"],
+  cancel: ["上游取消", "请判断是否仍可继续。需要调整时请向用户说明。"],
+};
+
 export class Scheduler {
   private readonly taskWaits = new Map<number, string>(); // task id → why a ready-to-start task hasn't started (lease conflict)
   private readonly committing = new Map<number, Promise<unknown>>();
+  private gitQueue = Promise.resolve();
 
   constructor(
     private readonly ctx: EngineContext,
@@ -38,10 +50,7 @@ export class Scheduler {
 
   resumeAfterCancellation() {
     const run = this.ctx.store.openRun();
-    if (!run) return;
-    this.schedule(run.id);
-    const agents = this.ctx.store.liveAttempts(run.id).filter((a) => a.status === "ready").map((a) => a.agent);
-    for (const agent of new Set(agents)) this.deliver(agent);
+    if (run) this.schedule(run.id);
   }
 
   private pipelineStages(): TaskStage[] {
@@ -81,6 +90,96 @@ export class Scheduler {
     return { key: t.key, title: t.title, description: t.description, owner: t.owner, reviewer: t.reviewer, depends_on: t.depends_on, paths: t.paths, status: t.status };
   }
 
+  private dependencyPlan(task: Task, tasks: Map<string, Task>, attempts: Attempt[]) {
+    const waiting: string[] = [];
+    const basis: DependencyBasis[] = [];
+    for (const dep of task.depends_on) {
+      const ref = parseDependency(dep);
+      const upstream = ref && tasks.get(ref.key);
+      if (!ref || !upstream) {
+        waiting.push(dep);
+      } else if (ref.stage) {
+        const handoff = this.stageHandoff(upstream, ref.stage, attempts);
+        if (handoff) basis.push({ dep, stage: ref.stage, handoff_id: handoff.id, commit: handoff.commit_sha });
+        else waiting.push(dep);
+      } else if (upstream.status !== "done") {
+        waiting.push(dep);
+      }
+    }
+    return { waiting, basis };
+  }
+
+  unmetDependencies(task: Task, tasks: Map<string, Task>, attempts: Attempt[]) {
+    return this.dependencyPlan(task, tasks, attempts).waiting;
+  }
+
+  private stageHandoff(task: Task, stage: string, attempts: Attempt[]) {
+    return stageDependencyHandoff(task, stage, attempts, (id) => this.ctx.store.handoff(id));
+  }
+
+  upstreamState(task: Task, tasks = this.ctx.store.tasks(task.run_id)) {
+    if (!task.dep_basis?.length) return [];
+    const attempts = this.ctx.store.attempts(task.run_id);
+    return task.dep_basis.map((basis) => {
+      const ref = parseDependency(basis.dep);
+      const upstream = tasks.find((t) => t.key === ref?.key);
+      const current = upstream && this.stageHandoff(upstream, basis.stage, attempts);
+      const state = upstream?.status === "cancelled" ? "cancelled"
+        : !current ? "reworking" : current.id === basis.handoff_id ? "current" : "superseded";
+      return { dep: basis.dep, state };
+    });
+  }
+
+  private upstreamChanges(task: Task, tasks: Task[]) {
+    return (task.dep_basis ?? []).flatMap((basis) => {
+      const ref = parseDependency(basis.dep);
+      const upstream = tasks.find((t) => t.key === ref?.key);
+      if (!upstream) return [];
+      return this.ctx.store.taskHandoffs(upstream.id)
+        .filter((h) => h.stage_id === basis.stage && h.id > basis.handoff_id)
+        .map((h) => ({
+          dep: basis.dep, based_on_handoff_id: basis.handoff_id, based_on_commit: basis.commit,
+          handoff_id: h.id, commit: h.commit_sha, summary: h.data.summary, files_changed: h.data.files_changed,
+        }));
+    }).sort((a, b) => a.handoff_id - b.handoff_id);
+  }
+
+  private notifyDownstream(upstream: Task, event: UpstreamEvent, tasks = this.ctx.store.tasks(upstream.run_id)) {
+    const [label, instruction] = upstreamMessage[event.kind];
+    const handoff = event.kind === "change" ? event.handoff : undefined;
+    const reason = event.kind === "change" ? event.handoff.data.summary : event.reason;
+    const eventId = event.kind === "rework" ? event.attempt.id : handoff?.id ?? upstream.id;
+    for (const task of tasks) {
+      if (task.status !== "active") continue;
+      for (const basis of task.dep_basis ?? []) {
+        if (parseDependency(basis.dep)?.key !== upstream.key) continue;
+        if (handoff && (handoff.stage_id !== basis.stage || handoff.id <= basis.handoff_id)) continue;
+        if (event.kind === "rework" && !rejectionAffectsStage(upstream, event.attempt, basis.stage)) continue;
+        const current = this.ctx.store.taskLiveAttempt(task.id);
+        const recipients = new Set([task.owner]);
+        if (current?.status === "in_progress" && (current.agent === task.reviewer || this.stageOf(task, current.stage_id).on_reject)) {
+          recipients.add(current.agent);
+        }
+        const body = [
+          `运行 #${upstream.run_id}`,
+          `上游 ${upstream.key}「${upstream.title}」 阶段 ${basis.stage} → 下游 ${task.key}`,
+          `开工依据 ${basis.commit ?? "无"}（交接 #${basis.handoff_id}）`,
+          `新交接 ${handoff?.commit_sha ?? "无"}${handoff ? `（交接 #${handoff.id}）` : ""}`,
+          `摘要 / 原因 ${reason}`,
+          `改动文件 ${handoff?.data.files_changed?.join("、") || "无"}`,
+          instruction,
+        ].join("\n");
+        for (const to of recipients) {
+          this.postman.sendMail({
+            id: `upstream:${upstream.run_id}:${task.id}:${basis.dep}:${event.kind}:${eventId}:${to}`,
+            run_id: upstream.run_id, from: "bridge", to, kind: "system", ack_required: false,
+            subject: `${label}：${basis.dep} → ${task.key}`, body,
+          });
+        }
+      }
+    }
+  }
+
   private turnPayload(run: Run, task: Task, a: Attempt, resumed: boolean, shared: { shared_dir: string; shared_dir_error?: string }): Result {
     const stage = this.stageOf(task, a.stage_id);
     const all = this.ctx.store.tasks(run.id);
@@ -98,7 +197,10 @@ export class Scheduler {
         "复审时，rechecks 必须覆盖 feedback.blocking 里所有带编号的项，否则提交被拒；复审提出的新问题写 late_reason。",
     };
     const owned = task.stages.filter((s) => s.owns?.length).map((s) => `${s.id}：${s.owns!.join("、")}`);
-    const deps = all.filter((t) => task.depends_on.includes(t.key));
+    const refs = new Map(task.depends_on.map((dep) => [parseDependency(dep)?.key, dep]));
+    const deps = all.filter((t) => refs.has(t.key));
+    const upstream_state = this.upstreamState(task, all);
+    const upstream_changes = this.upstreamChanges(task, all);
     const meeting = run.meeting_id ? this.ctx.store.meeting(run.meeting_id) : undefined;
     const parallel = all.filter((t) => t.id !== task.id && t.status === "active").map((t) => `${t.key}（${t.owner}）：${t.paths.join("、") || "未声明范围"}`);
     const showTask = multi || !!meeting;
@@ -107,6 +209,10 @@ export class Scheduler {
       : "";
     const fromRejected = fb?.kind === "rework" && input?.stage_id === fb.from_stage;
     let inputData = input?.data;
+    if (inputData?.based_on) {
+      const { based_on, ...rest } = inputData;
+      inputData = rest;
+    }
     let feedback = fb;
     if (inputData && fromRejected) {
       const { review_comments, observations, issues, rechecks, ...rest } = inputData;
@@ -133,13 +239,17 @@ export class Scheduler {
       dependencies: deps.map((t) => {
         const current = t.status === "active" ? this.ctx.store.taskLiveAttempt(t.id) : undefined;
         const last = this.ctx.store.taskHandoffs(t.id).at(-1);
+        const basis = task.dep_basis?.find((entry) => entry.dep === refs.get(t.key));
         return {
           key: t.key, title: t.title, status: t.status,
           stage: current?.stage_id ?? null, stage_status: current?.status ?? null,
           last_handoff_stage: last?.stage_id ?? null, summary: last?.data.summary ?? null, commit: last?.commit_sha ?? null,
           files_changed: last?.data.files_changed ?? [],
+          based_on: basis ? { stage: basis.stage, handoff_id: basis.handoff_id, commit: basis.commit } : undefined,
         };
       }),
+      upstream_state: upstream_state.length ? upstream_state : undefined,
+      upstream_changes: upstream_changes.length ? upstream_changes : undefined,
       meeting_minutes: meeting?.doc_path ?? undefined,
       parallel_tasks: parallel.length ? parallel : undefined,
       instructions:
@@ -155,7 +265,8 @@ export class Scheduler {
           : "") +
         (fb ? fbGuide[fb.kind] : "") +
         (owned.length ? `文件分工（${owned.join("；")}）：改动其他阶段负责的文件时，请在交接单 notes_for_next 里说明原因。` : "") +
-        reviewGuide,
+        reviewGuide +
+        (stage.on_reject && upstream_state.length ? "审查时参照 upstream_state 和 upstream_changes，核对与上游当前交接的兼容性。" : ""),
     };
   }
 
@@ -205,17 +316,19 @@ export class Scheduler {
     });
   }
 
-  /** One task at a time per agent: mail its oldest ready attempt once it has nothing in progress or in its inbox. */
+  /** Once the agent is free, mail its oldest review or its oldest other ready attempt. */
   private deliver(agent: string) {
     const run = this.ctx.store.openRun();
     if (!run) return;
     if (this.ctx.store.agentAttempts(run.id, agent, ["in_progress"]).length) return;
     const ready = this.ctx.store.agentAttempts(run.id, agent, ["ready"]);
     if (!ready.length) return;
-    const task = this.ctx.store.task(ready[0].task_id)!;
-    if (this.leases.cancellationConflict(task)) return;
     const mailed = ready.some((a) => this.ctx.store.taskMailFor(a.id).some((m) => [...LIVE_MAIL, "fetched"].includes(m.status as any)));
-    if (!mailed) this.sendTaskMail(run.id, ready[0]);
+    if (mailed) return;
+    const eligible = ready.map((attempt) => ({ attempt, task: this.ctx.store.task(attempt.task_id)! }))
+      .filter(({ task }) => !this.leases.cancellationConflict(task));
+    const next = eligible.find(({ task, attempt }) => this.stageOf(task, attempt.stage_id).on_reject) ?? eligible[0];
+    if (next) this.sendTaskMail(run.id, next.attempt);
   }
 
   startRun(goal: string): Result {
@@ -242,7 +355,10 @@ export class Scheduler {
       const acknowledged = mails.filter((m) => m.status === "acked").map((m) => m.id);
       this.holdCancellation(a, tasks.get(a.task_id)!, this.postman.voidMails(unread, acknowledged));
     }
-    for (const t of tasks.values()) if (t.status === "pending" || t.status === "active") this.ctx.store.setTaskStatus(t.id, "cancelled");
+    const cancelled = [...tasks.values()].filter((t) => t.status === "pending" || t.status === "active");
+    for (const t of cancelled) this.ctx.store.setTaskStatus(t.id, "cancelled");
+    const afterStop = this.ctx.store.tasks(run.id);
+    for (const t of cancelled) this.notifyDownstream(t, { kind: "cancel", reason: "用户停止了整个运行。" }, afterStop);
     this.leases.releaseRun(run.id);
     this.taskWaits.clear();
     this.ctx.store.setRunStatus(run.id, "stopped");
@@ -258,16 +374,22 @@ export class Scheduler {
     this.leases.holdForCancellation(task, commit ? Promise.allSettled([done, commit]).then(() => {}) : done);
   }
 
-  /** Start every task whose dependencies are done and whose paths are free; finish the run when all tasks are. */
+  /** Start tasks whose dependencies and leases allow it, then deliver from the complete set of ready stages. */
   schedule(run_id: number) {
     const run = this.ctx.store.run(run_id);
     if (!run || (run.status !== "active" && run.status !== "awaiting_approval")) return;
     const tasks = this.ctx.store.tasks(run_id);
     const byKey = new Map(tasks.map((t) => [t.key, t]));
+    const attempts = tasks.some((t) => t.status === "pending" && t.depends_on.some((dep) => dep.includes("@")))
+      ? this.ctx.store.attempts(run_id) : [];
     let baseline: string[] | undefined;
     for (const t of tasks) {
       if (t.status !== "pending") continue;
-      if (!t.depends_on.every((k) => byKey.get(k)?.status === "done")) continue;
+      const { waiting, basis } = this.dependencyPlan(t, byKey, attempts);
+      if (waiting.length) {
+        this.taskWaits.delete(t.id);
+        continue;
+      }
       const cancelling = this.leases.cancellationConflict(t);
       const conflicts = cancelling ? [] : this.leases.leaseConflicts(t.paths, { agent: t.owner, taskId: t.id, exclusive: true });
       if (cancelling || conflicts.length) {
@@ -280,7 +402,7 @@ export class Scheduler {
       this.taskWaits.delete(t.id);
       baseline ??= snapshotChangedFiles(this.ctx.cfg.projectDir);
       this.ctx.store.recordTaskBaseline(t.id, baseline);
-      this.ctx.store.setTaskStatus(t.id, "active");
+      this.ctx.store.activateTask(t.id, basis);
       t.status = "active";
       this.leases.leaseTaskPaths(t);
       if (tasks.length > 1) this.ctx.event(run_id, null, "task", `${t.key}「${t.title}」开始（${t.owner}）`);
@@ -297,6 +419,8 @@ export class Scheduler {
       return;
     }
     this.refreshRunStatus(run_id);
+    const ready = this.ctx.store.liveAttempts(run_id).filter((a) => a.status === "ready");
+    for (const agent of new Set(ready.map((a) => a.agent))) this.deliver(agent);
   }
 
   /** awaiting_approval when everything live is waiting at a gate, otherwise active. */
@@ -311,8 +435,6 @@ export class Scheduler {
   private assign(run: Run, task: Task, stage: TaskStage, feedback: Feedback | null) {
     const a = this.ctx.store.createAttempt(run.id, task.id, stage.id, stage.agent, feedback ? JSON.stringify(feedback) : null);
     this.ctx.log("stage_assigned", { run: run.id, task: task.key, stage: stage.id, agent: stage.agent, attempt: a.id, agentStatus: this.presence.status(stage.agent) });
-    this.deliver(stage.agent);
-    this.refreshRunStatus(run.id);
   }
 
   private advance(run: Run, task: Task, fromStage: string, feedback: Feedback | null) {
@@ -323,7 +445,6 @@ export class Scheduler {
     this.ctx.store.releaseLeasesOfTask(task.id);
     this.ctx.log("task_done", { run: run.id, task: task.key });
     if (this.ctx.store.tasks(run.id).length > 1) this.ctx.event(run.id, null, "task", `${task.key}「${task.title}」完成`);
-    this.schedule(run.id);
   }
 
   /** Decide what the handoff commits and what to tell the human about scope. */
@@ -430,6 +551,7 @@ export class Scheduler {
     const { issues: newIssues, rechecks, ...fields } = submission;
     const scopeNotes: string[] = [];
     const data: HandoffData = { ...fields, addressed: checkAddressed(fields.addressed, fb, scopeNotes) };
+    if (task.dep_basis?.length) data.based_on = task.dep_basis;
     if (submission.verdict) {
       const byId = new Map(blocking.map((issue) => [issue.id, issue]));
       data.rechecks = rechecks?.map((entry) => ({ ...entry, issue: byId.get(entry.id)! }));
@@ -448,10 +570,14 @@ export class Scheduler {
       const newIds = new Set(data.issues.map(({ id }) => id));
       data.review_comments = stillOpen.map((issue) => reviewComment(issue, !newIds.has(issue.id)));
     }
-    const commit = this.scopeAndCommit(run, task, a, stage, agent, data, scopeNotes);
+    const commit = this.gitQueue.then(() => this.ctx.store.attempt(a.id)?.status === "in_progress"
+      ? this.scopeAndCommit(run, task, a, stage, agent, data, scopeNotes)
+      : null);
+    this.gitQueue = commit.then(() => {}, () => {});
     this.committing.set(a.id, commit);
-    const { commit_sha, commit_error, scope_notes } = await commit.finally(() => this.committing.delete(a.id));
-    if (this.ctx.store.attempt(a.id)?.status !== "in_progress") return err("这个阶段已停止或被替换，交接未推进流程。");
+    const committed = await commit.finally(() => this.committing.delete(a.id));
+    if (!committed || this.ctx.store.attempt(a.id)?.status !== "in_progress") return err("这个阶段已停止或被替换，交接未推进流程。");
+    const { commit_sha, commit_error, scope_notes } = committed;
 
     const h = this.ctx.store.addHandoff({ run_id: run.id, attempt_id: a.id, stage_id: stage.id, agent, data, commit_sha, commit_error, scope_notes });
     const label = this.taskLabel(task);
@@ -465,16 +591,17 @@ export class Scheduler {
     const after = this.presence.doorbellKind(agent) === "poll" ? "立即调用 wait_for_mail 等信。" : "可以结束本回合了，有新信时会叫醒你。";
     if (stage.gate) {
       this.ctx.store.updateAttempt(a.id, { status: "awaiting_approval", handoff_id: h.id, ended_at: ended });
-      this.refreshRunStatus(run.id);
+      this.notifyDownstream(task, { kind: "change", handoff: h });
       this.ctx.event(run.id, null, "gate", `「${label}${stage.id}」等待你在面板上审批`);
       this.ctx.notifyHuman("协作桥：等你审批", `${agent} 完成了「${label}${stage.id}」：${data.summary}`);
-      this.deliver(agent);
+      this.schedule(run.id);
       return { status: "submitted", commit: commit_sha, commit_note: commit_error, scope_notes, next: "等待用户在面板上审批", instructions: "已提交。" + after };
     }
     this.ctx.store.updateAttempt(a.id, { status: "done", handoff_id: h.id, ended_at: ended });
+    this.notifyDownstream(task, { kind: "change", handoff: h });
     // A rework round's requirements travel on, so the next reviewer knows what this round was for.
     this.advance(run, task, stage.id, fb && fb.kind !== "approval_note" ? { ...fb, kind: "carried" } : null);
-    this.deliver(agent);
+    this.schedule(run.id);
     const nextLive = this.ctx.store.taskLiveAttempt(task.id);
     const runNow = this.ctx.store.run(run.id)!;
     return {
@@ -528,8 +655,10 @@ export class Scheduler {
       };
       this.ctx.event(run.id, null, "gate", `你打回了「${label}${stage.id}」→「${target.id}」${trimmed ? "：" + trimmed : ""}`);
       this.assign(run, task, target, fb);
+      const reasons = [trimmed, ...blocking.map((issue) => reviewComment(issue, false))].filter(Boolean);
+      this.notifyDownstream(task, { kind: "rework", attempt: a, reason: reasons.join("；") || "用户打回了上游交接。" });
     }
-    this.refreshRunStatus(run.id);
+    this.schedule(run.id);
     return { ok: true };
   }
 

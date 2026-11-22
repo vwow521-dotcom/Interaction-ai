@@ -71,6 +71,9 @@ export function handoffCard(item, anchor, rejectStage) {
     + block("给下一位", data.notes_for_next && '<p class="prose">' + esc(data.notes_for_next) + "</p>")
     + block("改动文件", list(data.files_changed))
     + block("范围提示", list(item.scope_notes));
+  const upstreamLabels = { reworking: "正在返工", superseded: "已有更新", cancelled: "已取消" };
+  const upstream = (gate?.upstream_state ?? []).flatMap(({ dep, state }) =>
+    Object.hasOwn(upstreamLabels, state) ? [`依据的 ${dep} ${upstreamLabels[state]}`] : []);
   let control;
   if (gate) {
     const approve = postButton("decide", gate.attempt_id, gate.reject_first ? "仍然通过" : "批准", {
@@ -91,6 +94,7 @@ export function handoffCard(item, anchor, rejectStage) {
       "<h3>" + esc(stage) + " 交接</h3>" + summary +
       '<div class="card-byline">' + esc(item.agent) + (commit ? " · " + commit : "") + "</div>",
     control,
-    body: reviewStats(item) + (body ? details("handoff", "查看交接详情", '<div class="detail-body">' + body + "</div>") : ""),
+    body: block("上游依赖", list(upstream)) + reviewStats(item) +
+      (body ? details("handoff", "查看交接详情", '<div class="detail-body">' + body + "</div>") : ""),
   };
 }

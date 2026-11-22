@@ -41,10 +41,11 @@ export function parseFolderCursor(value: string): FolderCursor | null {
 }
 
 export function taskStates(tasks: Task[], attempts: Attempt[], scheduler: Scheduler) {
+  const byKey = new Map(tasks.map((t) => [t.key, t]));
   return tasks.map((task) => {
     const history = attempts.filter((a) => a.task_id === task.id);
     const live = history.filter((a) => a.status in LIVE_RANK).at(-1);
-    const deps = task.depends_on.filter((key) => tasks.find((t) => t.key === key)?.status !== "done");
+    const deps = task.status === "pending" ? scheduler.unmetDependencies(task, byKey, attempts) : [];
     return {
       ...task, live: live ?? null, rounds: history.length,
       waiting: task.status === "pending" ? (deps.length ? "等 " + deps.join("、") : scheduler.taskWait(task.id) ?? null) : null,

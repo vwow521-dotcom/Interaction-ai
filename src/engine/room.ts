@@ -183,6 +183,7 @@ export class Room {
         reject_to: stage?.on_reject ?? a.stage_id,
         reject_first: h.data.verdict === "reject",
         feedback: this.scheduler.parseFeedback(a.feedback),
+        upstream_state: task?.dep_basis?.length ? this.scheduler.upstreamState(task) : undefined,
       };
     }
     return {
