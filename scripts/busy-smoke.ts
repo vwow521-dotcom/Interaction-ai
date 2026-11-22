@@ -121,6 +121,32 @@ export async function smokeBusy({ base, startDaemon, stopDaemon, api, call, chec
       "a later report with busy_minutes replaces the earlier period, counted from that report");
     const flagged2 = await waitOverdue(m2, 15_000);
     check(flagged2 !== null && flagged2 >= until2, "the replaced, shorter period expires and the mail is flagged on time");
+
+    // Parallel tasks: bob's review of A waits at the gate while bob works on B. The busy line still shows.
+    await api("/api/runs/stop", {});
+    const r = await connect("rev");
+    await call(r, "join", { agent_id: "rev" });
+    const meeting = (await api("/api/meetings", { topic: "并行时的长命令", participants: ["bob"] })).json.meeting_id;
+    await call(b2, "fetch_inbox", { agent_id: "bob" });
+    await call(b2, "submit_meeting_turn", { agent_id: "bob", meeting_id: meeting, content: "提案" });
+    await api(`/api/meetings/${meeting}/next`, { action: "finalize" });
+    await call(b2, "fetch_inbox", { agent_id: "bob" });
+    const final = await call(b2, "submit_meeting_turn", { agent_id: "bob", meeting_id: meeting, content: "定稿", tasks: [
+      { id: "A", title: "上游", owner: "rev", reviewer: "bob", paths: ["a.txt"] },
+      { id: "B", title: "下游", owner: "bob", depends_on: ["A@implement"], paths: ["b.txt"] },
+    ] });
+    await api(`/api/meetings/${meeting}/decide`, { action: "approve" });
+    await call(r, "fetch_inbox", { agent_id: "rev" });
+    await call(r, "submit_handoff", { agent_id: "rev", summary: "A 实现" });
+    const reviewA = taskMail(await call(b2, "fetch_inbox", { agent_id: "bob" }));
+    await call(b2, "submit_handoff", { agent_id: "bob", summary: "A 审查通过", verdict: "approve" });
+    const implB = taskMail(await call(b2, "fetch_inbox", { agent_id: "bob" }));
+    const busyB = await call(b2, "report_progress", { agent_id: "bob", text: "B 跑完整 smoke", busy_minutes: 30 });
+    s = await state();
+    const view = bob(s).activity;
+    check(final.status === "submitted" && reviewA?.task.stage.id === "review" && implB?.task.task.key === "B" &&
+      view.state === "awaiting_you" && view.busy_until === busyB.busy_until,
+      "with one task at the gate and another in progress, the activity keeps the gate headline and still carries busy_until");
   } finally {
     for (const c of clients) await c.close().catch(() => {});
     await stopDaemon();
