@@ -186,6 +186,7 @@ try {
     "built-in, fallback, example and repository review instructions agree");
   await startDaemon();
 
+  await (await import("./release-smoke.js")).smokeRelease(ROOT, BASE);
   // Prompts and implicit join go through the stdio proxy, where the native client name reaches the daemon.
   const nativeCodex = await connectProxy("codex-mcp-client");
   const prompts = await nativeCodex.listPrompts();

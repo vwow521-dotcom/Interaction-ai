@@ -5,7 +5,7 @@
 //   ai-bridge init <dir>            prepare a project folder (git, bridge.config.yaml)
 //   ai-bridge start [dir] [--port]  run the bridge for a project (default: current folder)
 //   ai-bridge doctor                check that everything is consistent and current (incl. against GitHub)
-//   ai-bridge update [--ref <branch|tag|commit>]
+//   ai-bridge update [--channel release|main] [--ref <branch|tag|commit>]
 //                                   reinstall from GitHub, then refresh only the clients already configured
 //
 // Every file change makes a timestamped backup first (<file>.bak-ai-bridge-<time>). `--dry-run` shows changes only.
@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildAt, latestRelease, inspectAsset } from "./release-asset.js";
 import { installedVersion } from "./diagnostics/github.js";
 import { acpChecks } from "./diagnostics/acp.js";
 import { probe } from "./diagnostics/probe.js";
@@ -26,13 +27,7 @@ const PKG_JSON = JSON.parse(fs.readFileSync(path.join(PKG, "package.json"), "utf
 const VERSION: string = PKG_JSON.version;
 /** "owner/name" from package.json repository, used by `update` and `doctor`. */
 const REPO: string | undefined = String(PKG_JSON.repository?.url ?? PKG_JSON.repository ?? "").match(/github\.com[/:]([^/]+\/[^/.]+)/)?.[1];
-const BUILD: { commit?: string | null; dirty?: boolean; builtAt?: string } = (() => {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(PKG, "dist", "build-info.json"), "utf8"));
-  } catch {
-    return {};
-  }
-})();
+const BUILD = buildAt(PKG, import.meta.url.endsWith(".ts"));
 const short = (c?: string | null) => (c ? c.slice(0, 7) : "未知");
 const NODE = process.execPath;
 const PROXY = path.join(PKG, "bin", "bridge-mcp.mjs");
@@ -172,54 +167,48 @@ function remoteCommit(ref: string): string | null {
 }
 
 async function update() {
-  if (!REPO) return bad("package.json 里没有 GitHub 仓库地址，没法从 GitHub 更新");
+  if (!REPO) throw Error("package.json 缺少 GitHub 仓库地址");
+  const channel = flag("channel") ? opt("channel") : flag("ref") ? "main" : "release";
   const ref = opt("ref") ?? "main";
-  const url = `https://github.com/${REPO}.git`;
-  console.log(`协作桥 ${VERSION}（${short(BUILD.commit)}）：从 GitHub 更新 ${REPO}#${ref}`);
-  const latest = remoteCommit(ref);
-  // Compare with the global install, not with this copy: `node bin/ai-bridge.mjs update` from a checkout
-  // runs newer code than what is installed.
-  let installed: typeof BUILD = {};
-  try {
-    const root = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    installed = JSON.parse(fs.readFileSync(path.join(root, "ai-bridge", "dist", "build-info.json"), "utf8"));
-  } catch {}
-  if (latest && latest === installed.commit && !installed.dirty && !flag("force"))
-    return ok(`全局安装已经是 ${ref} 的最新提交 ${short(latest)}（要强制重装加 --force）`);
-  // Not `npm install -g github:…`: for a global git install npm runs the clone's dependency install in
-  // global mode, so prepare (tsc) fails without its dependencies, and npm has already removed the old copy.
-  // Instead: fetch + build in a temp folder, and only touch the global install once a package exists.
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bridge-update-"));
-  const src = path.join(tmp, "src");
-  const steps: [string, string][] = [
-    [tmp, `git init -q src`],
-    [src, `git fetch -q --depth 1 ${url} ${ref}`],
-    [src, "git checkout -q FETCH_HEAD"],
-    [src, "npm ci --no-audit --no-fund"], // runs prepare: build + dist/build-info.json
-    [src, `npm pack --ignore-scripts --pack-destination "${tmp}"`],
-  ];
-  if (DRY) {
-    steps.forEach(([, c]) => info(`[dry-run] 会运行：${c}`));
-    ["npm install -g <打好的包>", "ai-bridge setup --refresh", "ai-bridge doctor"].forEach((c) => info(`[dry-run] 会运行：${c}`));
-    return fs.rmSync(tmp, { recursive: true, force: true });
+  if (channel !== "release" && channel !== "main") throw Error("--channel 需要 release 或 main");
+  if (flag("ref") && (channel !== "main" || !opt("ref") || ref.startsWith("-"))) throw Error("--ref 仅适用于 main 通道，且需要指定分支、标签或提交号");
+  const root = execSync("npm root -g", { encoding: "utf8" }).trim();
+  const installedDir = path.join(root, "ai-bridge");
+  const installed = buildAt(installedDir);
+  const release = channel === "release" ? await latestRelease(REPO, PKG_JSON.name) : null;
+  if (!flag("force") && installed.channel === channel && !installed.dirty) {
+    if (release && fs.existsSync(path.join(installedDir, "package.json")) &&
+        JSON.parse(fs.readFileSync(path.join(installedDir, "package.json"), "utf8")).version === release.version)
+      return ok("已安装最新正式 Release " + release.version);
+    if (!release && installed.commit && remoteCommit(ref) === installed.commit) return ok("已安装最新提交 " + short(installed.commit));
   }
+  if (DRY) return info(`[dry-run] 会${release ? "下载并核对 " + release.filename : "检出并构建 " + ref}，然后全局安装、setup --refresh、doctor`);
   const running = await bridgeRunning();
-  // Drop npm settings inherited from an outer `npm run` / `npm -g` so the build installs locally.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_config_(global|location|prefix)$/i.test(k)));
-  const run = (cwd: string, c: string) => {
-    console.log(`\n$ ${c}`);
-    execSync(c, { cwd, stdio: "inherit", env });
-  };
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bridge-update-"));
   try {
-    for (const [cwd, c] of steps) run(cwd, c);
-    const tgz = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
-    if (!tgz) throw new Error("npm pack 没有产出安装包");
-    // Shell-run so npm.cmd and the freshly installed ai-bridge shim are found; setup/doctor run the new code.
-    run(tmp, `npm install -g "${path.join(tmp, tgz)}"`);
-    run(tmp, "ai-bridge setup --refresh");
-    run(tmp, "ai-bridge doctor");
-  } catch {
-    return bad("更新中断了，上面是出错的输出（全局安装只在最后一步才会被替换）");
+    let file: string;
+    if (release) {
+      file = path.join(tmp, release.filename);
+      const response = await fetch(release.url, { signal: AbortSignal.timeout(60000) });
+      if (!response.ok) throw Error("安装包下载失败：HTTP " + response.status);
+      fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+      inspectAsset(file, PKG_JSON.name, release.version);
+    } else {
+      const src = path.join(tmp, "src");
+      execFileSync("git", ["init", "-q", src]);
+      execFileSync("git", ["fetch", "-q", "--depth", "1", "--", `https://github.com/${REPO}.git`, ref], { cwd: src });
+      execFileSync("git", ["checkout", "-q", "FETCH_HEAD"], { cwd: src });
+      const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_config_(global|location|prefix)$/i.test(k)));
+      env.BRIDGE_BUILD_CHANNEL = "main";
+      execSync("npm ci --no-audit --no-fund", { cwd: src, env, stdio: "inherit" });
+      execSync("npm pack --ignore-scripts --pack-destination ..", { cwd: src, env, stdio: "inherit" });
+      const packed = fs.readdirSync(tmp).find(f => f.endsWith(".tgz"));
+      if (!packed) throw Error("npm pack 没有产出安装包");
+      file = path.join(tmp, packed);
+    }
+    fs.renameSync(file, path.join(tmp, "candidate.tgz"));
+    for (const command of ["npm install -g ./candidate.tgz", "ai-bridge setup --refresh", "ai-bridge doctor"])
+      execSync(command, { cwd: tmp, stdio: "inherit" });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -268,8 +257,16 @@ async function doctor() {
     return;
   }
   const built = `${short(BUILD.commit)}${BUILD.dirty ? "，构建时有未提交改动" : ""}${BUILD.builtAt ? `，构建于 ${BUILD.builtAt.slice(0, 16).replace("T", " ")}` : ""}`;
-  const install = await installedVersion(REPO, BUILD.commit ? remoteCommit("main") : null, BUILD, built);
-  print[install.state](install.text);
+  info(`CLI v${VERSION} · ${built} · ${BUILD.channel}`);
+  if (BUILD.channel === "main") {
+    const install = await installedVersion(REPO, remoteCommit("main"), BUILD, built);
+    print[install.state](install.text.replace("运行 ai-bridge update", "运行 ai-bridge update --channel main"));
+  } else if (BUILD.channel === "release" && REPO) {
+    try {
+      const latest = await latestRelease(REPO, PKG_JSON.name);
+      (VERSION === latest.version ? ok : info)(`安装版 v${VERSION}，最新 Release v${latest.version}`);
+    } catch (error) { info(String(error)); }
+  }
   const [maj, min] = process.versions.node.split(".").map(Number);
   if (maj > 22 || (maj === 22 && min >= 13)) ok(`Node ${process.versions.node}`);
   else bad(`Node ${process.versions.node}：需要 22.13 或更新（内置 SQLite）`);
@@ -295,7 +292,13 @@ async function doctor() {
   else ok("转接程序正常（桥没在运行，所以只有占位工具；ai-bridge start <项目> 后自动切换）");
 
   const s = await bridgeRunning();
-  if (s) info(`桥正在运行：项目 ${s.project}，成员 ${s.agents.map((a: any) => `${a.id}=${a.status}`).join("、")}`);
+  console.log("运行中的桥");
+  if (s?.daemon) {
+    const d = s.daemon;
+    info(`v${d.version} · ${d.commit} · ${d.channel}，启动于 ${d.started_at}，项目 ${d.project}，端口 ${d.port}`);
+    if (d.version === VERSION && d.commit === BUILD.commit) ok("安装版与运行版一致");
+    else bad("安装版和运行版不同，请停掉 ai-bridge 后重新 ai-bridge start");
+  } else if (s) info("运行中的桥版本未知（0.12 或更早），建议重启后核对");
   else info("桥没有在 " + BASE + " 运行");
 }
 
@@ -311,7 +314,7 @@ function help() {
   ai-bridge doctor                检查配置是否一致、安装是否和 GitHub 上的最新版一致
   ai-bridge doctor --probe [--project <目录>]
                                   检查门铃和格式；ACP 只发 initialize，不建会话
-  ai-bridge update [--ref <分支|标签|提交>] [--force]
+  ai-bridge update [--channel release|main] [--ref <分支|标签|提交>] [--force]
                                   从 GitHub 重新安装，然后只刷新已经配置了 bridge 的客户端
   ai-bridge setup --refresh       只更新已有的配置，不新增（update 会自动调用）
 
@@ -338,7 +341,7 @@ switch (cmd) {
     break;
   case "update":
   case "upgrade":
-    await update();
+    try { await update(); } catch (error) { bad(String(error)); process.exitCode = 1; }
     break;
   case "version":
   case "--version":

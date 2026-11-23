@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
+import { buildAt } from "./release-asset.js";
 import { Store } from "./store.js";
 import { Engine } from "./engine.js";
 import { parseFolderCursor } from "./engine/folders.js";
@@ -111,7 +112,7 @@ app.get("/classic", (_req, res) => {
 });
 
 app.get("/api/state", async (_req, res) => {
-  res.json({ ...engine.workspace.snapshot(), git: { repo: await isRepo(projectDir), dirty: (await dirtyFiles(projectDir)).length } });
+  res.json({ ...engine.workspace.snapshot(), daemon, git: { repo: await isRepo(projectDir), dirty: (await dirtyFiles(projectDir)).length } });
 });
 function queryId(value: unknown) {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
@@ -290,6 +291,14 @@ try {
 
 const address = server.address();
 const port = typeof address === "object" && address ? address.port : PORT;
+const installDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const build = buildAt(installDir, import.meta.url.endsWith(".ts"));
+const daemon = {
+  version: JSON.parse(fs.readFileSync(path.join(installDir, "package.json"), "utf8")).version,
+  commit: build.commit ?? "unknown", dirty: build.dirty ?? null, channel: build.channel,
+  built_at: build.builtAt ?? null, started_at: new Date().toISOString(),
+  project: projectDir, port, install_dir: installDir,
+};
 const bridgeUrl = `http://127.0.0.1:${port}`;
 const engine = new Engine(cfg, new Store(projectDir), bridgeUrl, async (agent) => {
   const owned = [...transports].filter(([id]) => engine.presence.acpAgent(id) === agent);

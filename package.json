@@ -1,6 +1,6 @@
 {
   "name": "ai-bridge",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "本地 AI 协作桥：让 Claude、Codex 等桌面端 AI 通过 MCP 信箱与门铃接力完成同一个项目",
   "repository": {
     "type": "git",
@@ -19,7 +19,10 @@
     "bridge.config.example.yaml",
     "bridge.deepseek-acp.patch.yaml",
     "docs/USAGE.md",
-    "README.md"
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "docs/images"
   ],
   "engines": {
     "node": ">=22.13"

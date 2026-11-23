@@ -495,6 +495,11 @@ state.subscribe((s) => s, (snapshot) => {
   }
   for (const f of snapshot.folders_head) library.set(f.id, f);
   $("#project").textContent = project;
+  const version = $("#daemon-version");
+  const daemon = snapshot.daemon;
+  version.hidden = !daemon;
+  version.textContent = daemon ? `v${daemon.version} · ${daemon.commit === "dev" ? "开发版" : daemon.commit.slice(0, 7)}` : "";
+  version.title = daemon ? `${daemon.commit} · ${daemon.channel} · ${daemon.started_at}` : "";
   $("#project").title = project;
   $("#launch-project").textContent = project + (snapshot.git.repo ? " · Git" : " · 未初始化 Git");
   document.title = (snapshot.inbox.length ? "(" + snapshot.inbox.length + ") " : "") + "AI Bridge 协作面板";

@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Bridge 协作面板</title>
   <link rel="stylesheet" href="/panel/app.css">
+  <style>#daemon-version:not([hidden]) { display: inline-block; flex-shrink: 0; }</style>
   <script type="module" src="/panel/js/main.js"></script>
 </head>
 <body>
   <header class="top">
     <div class="l">
-      <div class="brand"><b>AI Bridge</b><span id="project"></span></div>
+      <div class="brand"><b>AI Bridge</b><span id="project"></span><span id="daemon-version" hidden></span></div>
       <button type="button" class="ib" data-act="back" title="后退" aria-label="后退" disabled></button>
       <button type="button" class="ib" data-act="forward" title="前进" aria-label="前进" disabled></button>
     </div>

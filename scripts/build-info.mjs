@@ -12,7 +12,10 @@ const git = (...args) => {
   }
 };
 
+const channel = process.env.BRIDGE_BUILD_CHANNEL ?? "dev";
+if (!["main", "dev", "release"].includes(channel)) throw Error("未知构建通道：" + channel);
 const info = {
+  channel,
   commit: git("rev-parse", "HEAD"),
   dirty: git("status", "--porcelain", "--untracked-files=no") ? true : false,
   builtAt: new Date().toISOString(),
