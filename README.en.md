@@ -122,7 +122,7 @@ Each project's `.bridge/` data and `bridge.config.yaml` are left in place.
 
 ## License
 
-To be decided (TBD).
+[MIT](LICENSE).
 
 ## More
 

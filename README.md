@@ -122,7 +122,7 @@ npm uninstall -g ai-bridge
 
 ## 许可证
 
-待定（TBD）。
+[MIT](LICENSE)。
 
 ## 更多
 
