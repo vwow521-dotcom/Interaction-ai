@@ -191,9 +191,18 @@ export interface Handoff {
   agent: string;
   data: HandoffData;
   commit_sha: string | null;
-  commit_error: string | null;
+  commit_error: string | null; // a real git failure (only in pre-0.13 rows); skip reasons are read into commit_note
+  commit_note: string | null; // why nothing was committed, e.g. 「未提交：没有文件改动」; shown in a neutral style
   scope_notes: string[]; // e.g. files changed but not declared, files owned by another stage
   created_at: string;
+}
+
+/** Since f5ea68b a failed commit never becomes a handoff, so the column only holds skip reasons, all prefixed
+ * 「未提交：」. Older rows may still hold real git errors; those keep the error style. Decided on the text alone. */
+export const COMMIT_NOTE_PREFIX = "未提交：";
+export function splitCommitError(text: string | null | undefined): { commit_error: string | null; commit_note: string | null } {
+  if (!text) return { commit_error: null, commit_note: null };
+  return text.startsWith(COMMIT_NOTE_PREFIX) ? { commit_error: null, commit_note: text } : { commit_error: text, commit_note: null };
 }
 
 export interface Note {
@@ -627,7 +636,7 @@ export class Store {
   }
 
   // ---- handoffs
-  addHandoff(h: Omit<Handoff, "id" | "created_at">): Handoff {
+  addHandoff(h: Omit<Handoff, "id" | "created_at" | "commit_note">): Handoff {
     const id = this.insert(
       "INSERT INTO handoffs (run_id, attempt_id, stage_id, agent, data, commit_sha, commit_error, scope_notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       h.run_id, h.attempt_id, h.stage_id, h.agent, JSON.stringify(h.data), h.commit_sha, h.commit_error, JSON.stringify(h.scope_notes), now(),
@@ -635,7 +644,7 @@ export class Store {
     return this.handoff(id)!;
   }
   private parseHandoff(row: any): Handoff {
-    return { ...row, data: JSON.parse(row.data), scope_notes: row.scope_notes ? JSON.parse(row.scope_notes) : [] };
+    return { ...row, ...splitCommitError(row.commit_error), data: JSON.parse(row.data), scope_notes: row.scope_notes ? JSON.parse(row.scope_notes) : [] };
   }
   handoff(id: number): Handoff | undefined {
     const r = this.one<any>("SELECT * FROM handoffs WHERE id = ?", id);

@@ -201,6 +201,7 @@ export class Room {
       issue_summary: issueSummary(h.data),
       commit_sha: h.commit_sha,
       commit_error: h.commit_error,
+      commit_note: h.commit_note,
       scope_notes: h.scope_notes,
       gate,
     };

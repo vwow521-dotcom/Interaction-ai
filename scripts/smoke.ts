@@ -24,6 +24,7 @@ import { smokeCli } from "./p2-cli-smoke.js";
 import { smokeAcp } from "./acp-smoke.js";
 import { smokeAcpProcess } from "./acp-process-smoke.js";
 import { smokeMemberNotes } from "./member-notes-smoke.js";
+import { waitFor } from "./smoke-wait.js";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 7891);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -834,13 +835,12 @@ try {
   await proxy.close();
   check(!(await state()).agents.find((a: any) => a.id === "pbot").binding, "closing proxy stdin deletes its MCP session and releases its identity");
 
+  // Used right after proxy and daemon restarts: poll (up to 20 s) rather than a fixed 6 s window.
   async function waitForProxyBinding() {
-    for (let i = 0; i < 60; i++) {
+    return waitFor(async () => {
       const agent = (await state()).agents.find((a: any) => a.id === "pbot");
-      if (agent.binding && agent.doorbellArmed) return agent.binding.session as string;
-      await sleep(100);
-    }
-    return null;
+      return agent.binding && agent.doorbellArmed ? agent.binding.session as string : null;
+    }, "pbot binding and doorbell", 20_000, 100).catch(() => null);
   }
   async function checkProxyDelivery(client: Client, message: string) {
     const before = frames.length;
@@ -1024,8 +1024,9 @@ try {
   await stopDaemon();
   await sleep(3000);
   await startDaemon();
-  await sleep(4000); // hook retries every 2 s
-  check((await state()).agents.find((a: any) => a.id === "hbot2").doorbellArmed, "parked hook re-armed after bridge restart");
+  // The hook retries every 2 s; poll for it instead of a fixed sleep (a slow run once missed a 4 s window).
+  const rearmed = await waitFor(async () => (await state()).agents.find((a: any) => a.id === "hbot2").doorbellArmed, "parked hook was not re-armed after bridge restart", 20_000, 200).catch(() => false);
+  check(rearmed, "parked hook re-armed after bridge restart");
   await api("/api/mail", { to: "hbot2", text: "重启后的信" });
   h = await survivor;
   check(JSON.parse(h.out).decision === "block", "mail after restart still wakes the parked Codex");
@@ -1644,6 +1645,7 @@ notify: { enabled: false }
   await smokeAcpProcess({ root: ROOT, port: PORT, check });
   await (await import("./stage-deps-smoke.js")).smokeStageDeps({ root: ROOT, port: PORT, check });
   await (await import("./handoff-lease-smoke.js")).smokeHandoffLeases({ startDaemon, stopDaemon, connect, call, api });
+  await (await import("./commit-note-smoke.js")).smokeCommitNote({ root: ROOT, startDaemon, stopDaemon, connect, call, api, check });
   await (await import("./plan-preview-smoke.js")).smokePlanPreview({ root: ROOT, base: BASE, startDaemon, stopDaemon, api, call, check });
 } catch (e) {
   console.error(e);

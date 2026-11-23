@@ -142,7 +142,8 @@ function handoffBody(h) {
     (d.decisions.length ? "<div class=mute>关键决策</div>" + list(d.decisions.map((x) => x.what + " —— " + x.why)) : "") +
     (d.files_changed.length ? "<div class=mute>改动文件</div>" + list(d.files_changed) : "") +
     (d.notes_for_next ? "<div class=mute>给下一位</div><div>" + esc(d.notes_for_next) + "</div>" : "") +
-    "<div><small>" + (h.commit_sha ? '提交 <a href="/api/commits/' + h.commit_sha + '" target="_blank">' + h.commit_sha.slice(0, 8) + "</a>" : esc(h.commit_error || "")) + "</small></div>";
+    "<div><small>" + (h.commit_sha ? '提交 <a href="/api/commits/' + h.commit_sha + '" target="_blank">' + h.commit_sha.slice(0, 8) + "</a>"
+      : h.commit_error ? '<span class="err">' + esc(h.commit_error) + "</span>" : esc(h.commit_note || "")) + "</small></div>";
 }
 
 const kindText = { proposal: "提案", critique: "互评", final: "定稿" };

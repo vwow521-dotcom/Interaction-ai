@@ -48,7 +48,7 @@ function actions(f, detail, snapshot, options, tab, active, route) {
     <p class="form-error fbar-error" data-error role="alert"></p></div>`;
 }
 
-function handoffRow(item, i, tasks) {
+export function handoffRow(item, i, tasks) {
   const card = handoffCard(item, "handoff-" + item.id, rejectStage(item, tasks));
   const { gate, data } = item;
   const tone = gate ? pill("待你审批", "need") : data.verdict === "approve" ? pill("通过", "ok") :
@@ -61,7 +61,8 @@ function handoffRow(item, i, tasks) {
     heading: `<span class="no">${gate ? "●" : i + 1}</span><span class="ti">${memberCover(item.agent)}
       <b title="${esc(summary)}">${esc(summary)}</b><span>${esc(item.agent)}${sha}</span></span>
       <span class="ver">${tone}</span><span class="tm">${timeTag(item.at)}</span>`,
-    body: preview + (item.commit_error ? `<p class="form-error">${esc(item.commit_error)}</p>` : "") + card.body,
+    body: preview + (item.commit_error ? `<p class="form-error">${esc(item.commit_error)}</p>`
+      : item.commit_note ? `<p class="muted commit-note">${esc(item.commit_note)}</p>` : "") + card.body,
   };
 }
 

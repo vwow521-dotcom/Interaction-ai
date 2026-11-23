@@ -6,6 +6,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import YAML from "yaml";
+import { waitFor } from "./smoke-wait.js";
 
 interface Fixture {
   root: string;
@@ -20,15 +21,7 @@ interface Fixture {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-async function until<T>(read: () => T | Promise<T>, description: string, timeoutMs = 15_000): Promise<NonNullable<T>> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const result = await read();
-    if (result) return result;
-    await sleep(35);
-  }
-  throw new Error("ACP: " + description);
-}
+const until = <T>(read: () => T | Promise<T>, description: string, timeoutMs = 15_000) => waitFor(read, "ACP: " + description, timeoutMs, 35);
 
 function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch { return false; }
