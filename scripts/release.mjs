@@ -29,7 +29,8 @@ function release() {
   if (process.argv.includes("--dry-run")) {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bridge-pack-"));
     try {
-      for (const entry of ["package.json", ...(pkg.files ?? [])]) {
+      // npm always ships LICENSE from the package root, even though it isn't listed in "files".
+      for (const entry of ["package.json", "LICENSE", ...(pkg.files ?? [])]) {
         if (fs.existsSync(entry)) fs.cpSync(entry, path.join(tmp, entry), { recursive: true });
       }
       execSync("npm pack --dry-run --json --ignore-scripts", { cwd: tmp, stdio: "inherit" });
@@ -48,7 +49,7 @@ function release() {
     const { build, read } = inspectAsset(pack, pkg.name, version);
     if (build.commit !== head || build.dirty !== false) throw Error("安装包提交或工作区状态不符");
     const entries = new Set(execFileSync("tar", ["-tzf", pack], { encoding: "utf8" }).trim().split(/\r?\n/));
-    const required = ["dist/cli.js", "dist/daemon.js", "bin/ai-bridge.mjs", "CHANGELOG.md", "README.md", "README.en.md"];
+    const required = ["dist/cli.js", "dist/daemon.js", "bin/ai-bridge.mjs", "CHANGELOG.md", "README.md", "README.en.md", "LICENSE"];
     for (const file of ["README.md", "README.en.md"])
       for (const match of read(file).matchAll(/docs\/images\/[^\s)"'<>]+/g)) required.push(match[0]);
     for (const entry of required) if (!entries.has("package/" + entry)) throw Error("安装包缺少 " + entry);
