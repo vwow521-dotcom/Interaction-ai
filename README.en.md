@@ -104,7 +104,7 @@ Each project's `.bridge/` data and `bridge.config.yaml` are left in place.
 - **Data in your project**: It lives in `<project>/.bridge/` (the SQLite database, logs and shared folders), which ships its own `.gitignore`. The bridge commits every handoff automatically under your Git identity.
 - **Network access**:
   - **No telemetry**: The bridge reports no usage data. The daemon, panel and doorbells only talk on this machine.
-  - **Version checks**: `doctor` calls the GitHub API (`api.github.com`) to read the latest Release, or the latest main commit when the install is from the main channel.
+  - **Version checks**: For a release-channel install, `doctor` calls the GitHub API (`api.github.com`) to read the latest Release. For a main-channel install, it runs `git ls-remote` against `github.com` to read the main commit, and calls the GitHub Compare API (`api.github.com`) only when the local commit differs from main, to tell which one is newer.
   - **Downloading updates**: `update` on the default channel calls the GitHub API and downloads the Release package from GitHub. `--channel main` fetches the code from `github.com`.
   - **Installing dependencies**: The `npm install -g` in the first install and in `update` downloads dependencies from the registry configured in npm (`npm config get registry`). `--channel main` also runs `npm ci`, which downloads from the addresses recorded in the repository's `package-lock.json`, currently `registry.npmmirror.com`. If you maintain a firewall allowlist, include all of these.
 - **Background member permissions**: By default the bridge answers every ACP permission request with "reject once". `permissions: allow` approves them automatically, which can let the agent run commands or touch files outside the project. Use it only in projects you trust.
@@ -112,7 +112,11 @@ Each project's `.bridge/` data and `bridge.config.yaml` are left in place.
 ## FAQ
 
 - **"X can't be woken" (叫不醒)**: X's conversation was most likely closed or disconnected. Open it and say "continue"; its first tool call restores the identity and picks up the queued mail.
-- **Port already in use**: `ai-bridge start` shows which project the bridge on port 7878 is running for. The Claude and Codex proxies, the Stop hook and `doctor` all connect to `127.0.0.1:7878` by default, so the project you want the AIs to join must run on 7878: stop the old bridge, then `ai-bridge start` your project. Run `ai-bridge doctor` afterwards and check that the 运行中的桥 (Running bridge) section shows that project. Use `--port` only to open a separate panel for looking at another project; the AIs won't connect there.
+- **Port already in use**: `ai-bridge start` shows which project the bridge on that port is running for. The Claude and Codex proxies, the Stop hook and `doctor` all connect to `127.0.0.1:7878` by default. You have two options:
+  - **Use 7878 (the default, recommended)**: Stop the old bridge, then `ai-bridge start` your project.
+  - **Use another port**, for example 7880: Set the user environment variable `BRIDGE_URL` to `http://127.0.0.1:7880`; in PowerShell, run `[Environment]::SetEnvironmentVariable("BRIDGE_URL", "http://127.0.0.1:7880", "User")`. Then fully quit and reopen Claude and Codex so their proxies and the Stop hook pick it up. Finally, in a new terminal, run `ai-bridge start <project> --port 7880`. To go back to the default, delete the variable and reopen Claude and Codex again.
+
+  Either way, run `ai-bridge doctor` in a new terminal to check: the 运行中的桥 (Running bridge) section must show your project and port, and once an AI joins, it must appear under 办公室 (Office) on that port's panel. With `--port` alone and no `BRIDGE_URL`, the AIs still connect to the old bridge on 7878; that only suits opening a separate panel to look at another project.
 - **Version mismatch**: When the 运行中的桥 (Running bridge) section of `doctor` shows `✗`, stop `ai-bridge` and run `ai-bridge start` again. The panel's top bar also shows the running version.
 - **`doctor` says it cannot read the latest Release**: Either no Release has been published yet, or GitHub could not be reached. This only affects the "is it up to date" check; every other check still runs.
 

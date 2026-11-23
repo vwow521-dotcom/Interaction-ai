@@ -104,7 +104,7 @@ npm uninstall -g ai-bridge
 - **项目里的数据**：存在 `<项目>/.bridge/`，包括 SQLite 数据库、日志和共享目录，并由它自带的 `.gitignore` 排除。协作桥会以你的 Git 身份自动提交每次交接。
 - **网络访问**：
   - **没有遥测**：协作桥不上报任何使用数据。守护进程、面板和门铃只在本机通信。
-  - **版本查询**：`doctor` 调用 GitHub API（`api.github.com`），读取最新 Release；main 通道的安装则读取 main 的提交。
+  - **版本查询**：release 通道的安装，`doctor` 调用 GitHub API（`api.github.com`）读取最新 Release。main 通道的安装，`doctor` 用 `git ls-remote` 访问 `github.com` 读取 main 的提交，只有本地提交和 main 不同时，才调用 GitHub Compare API（`api.github.com`）判断谁新谁旧。
   - **下载更新**：`update` 默认通道调用 GitHub API，并从 GitHub 下载 Release 安装包。`--channel main` 会从 `github.com` 取代码。
   - **依赖安装**：首次安装和 `update` 的 `npm install -g` 会从你在 npm 里配置的 registry（`npm config get registry`）下载依赖。`--channel main` 还会运行 `npm ci`，它按仓库 `package-lock.json` 里记录的地址下载依赖，目前是 `registry.npmmirror.com`。要配置防火墙白名单，请把以上地址都算进去。
 - **后台成员的权限**：默认对 ACP 权限请求自动「拒绝一次」。改成 `permissions: allow` 会自动批准，代理可能执行命令、访问项目外的文件。只在可信的项目里这样设置。
@@ -112,7 +112,11 @@ npm uninstall -g ai-bridge
 ## 常见问题
 
 - **「X 叫不醒」**：多半是 X 的对话被关掉或断开了。打开那个对话说一句「继续」，它的第一次工具调用会恢复身份、取走排队的信。详见[使用说明 · 异常情况](docs/USAGE.md#6-异常情况)。
-- **端口被占用**：`ai-bridge start` 会显示占用 7878 端口的协作桥在为哪个项目运行。Claude 和 Codex 的转接程序、Stop hook 以及 `doctor` 默认都连 `127.0.0.1:7878`，所以想让 AI 加入的项目必须跑在 7878 上：先停掉旧的桥，再 `ai-bridge start` 你的项目。之后运行 `ai-bridge doctor`，确认「运行中的桥」一节显示的是这个项目。`--port` 换端口只适合另开一个面板查看别的项目，AI 不会连到那里。
+- **端口被占用**：`ai-bridge start` 会显示占用端口的协作桥在为哪个项目运行。Claude 和 Codex 的转接程序、Stop hook 以及 `doctor` 默认都连 `127.0.0.1:7878`，有两种处理办法：
+  - **用 7878（默认配置，推荐）**：先停掉旧的桥，再 `ai-bridge start` 你的项目。
+  - **换一个端口**：例如 7880。先把用户环境变量 `BRIDGE_URL` 设成 `http://127.0.0.1:7880`，在 PowerShell 里运行 `[Environment]::SetEnvironmentVariable("BRIDGE_URL", "http://127.0.0.1:7880", "User")`；然后完全退出、重新打开 Claude 和 Codex，让转接程序和 Stop hook 读到这个变量；最后在新开的终端里运行 `ai-bridge start <项目> --port 7880`。改回默认时删掉这个变量，同样要重开 Claude 和 Codex。
+
+  无论哪种办法，都在新终端里运行 `ai-bridge doctor` 核对：「运行中的桥」一节显示的项目和端口要是你的项目，AI 加入后，那个端口的面板「办公室」里也要能看到它。如果只用 `--port`、不设 `BRIDGE_URL`，AI 仍会连到 7878 上的旧桥，这种用法只适合另开一个面板查看别的项目。
 - **版本不一致**：`doctor` 的「运行中的桥」一节显示 `✗ 安装版和运行版不同` 时，停掉 `ai-bridge` 后重新 `ai-bridge start`。面板顶栏也显示正在运行的版本。
 - **`doctor` 提示「无法读取最新正式 Release」**：仓库还没有发布 Release，或者访问 GitHub 失败。这只影响「是否最新」这一项检查，其他检查照常。
 

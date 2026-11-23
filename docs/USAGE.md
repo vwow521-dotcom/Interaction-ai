@@ -42,7 +42,11 @@ ai-bridge start E:\某项目    # 启动桥，面板 http://127.0.0.1:7878/
 ```
 
 - 数据存在 `<项目>/.bridge/`，不会被提交进 git。
-- 若端口已被占用，`start` 会显示已有桥的项目路径（如果可读）并退出。Claude 和 Codex 的转接程序、Stop hook 以及 `doctor` 默认都连 `127.0.0.1:7878`（环境变量 `BRIDGE_URL` 可以改，但 `setup` 不会替你配置），所以要让 AI 加入的项目必须跑在 7878 上：先停掉旧的桥，再 `start` 你的项目，然后用 `ai-bridge doctor` 确认「运行中的桥」一节显示的是这个项目。`--port` 换端口只适合另开一个面板查看别的项目，AI 不会连到那里。
+- 若端口已被占用，`start` 会显示已有桥的项目路径（如果可读）并退出。Claude 和 Codex 的转接程序、Stop hook 以及 `doctor` 默认都连 `127.0.0.1:7878`，有两种处理办法：
+  - **用 7878（默认配置，推荐）**：先停掉旧的桥，再 `start` 你的项目。
+  - **换一个端口**：把用户环境变量 `BRIDGE_URL` 设成新地址，例如运行 `[Environment]::SetEnvironmentVariable("BRIDGE_URL", "http://127.0.0.1:7880", "User")`；完全退出、重新打开 Claude 和 Codex，让转接程序和 Stop hook 读到它；再在新终端里 `start <项目> --port 7880`。`setup` 不会替你配置这个变量，改回默认时要删掉它，并重开 Claude 和 Codex。
+
+  核对：在新终端里运行 `ai-bridge doctor`，「运行中的桥」一节显示的应是这个项目和端口；AI 加入后，该端口面板的「办公室」里应能看到它。只用 `--port`、不设 `BRIDGE_URL` 时，AI 仍连 7878 上的旧桥，这种用法只适合另开一个面板查看别的项目。
 - 审批、提问、门铃没人应、确认超时时，会弹 Windows 通知。不想要通知，在 `bridge.config.yaml` 里设 `notify: { enabled: false }`。
 - 重启桥只需关掉终端再 `ai-bridge start` 一次。Claude 由转接程序自动重连；正在停靠的 Codex 会在 90 秒内反复重连，不会被放走。
 - 同一个 Claude 会话重启转接程序时，会按消息套接字恢复上次的身份和门铃。普通 MCP 连接因会话关闭而解绑时，下次工具调用会恢复身份并附上一条说明。面板「释放」或调用 `leave` 后，需要明确调用 `join` 才能再次加入。
