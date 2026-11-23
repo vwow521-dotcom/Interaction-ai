@@ -69,7 +69,7 @@ require('node:module').syncBuiltinESMExports();`);
       fs.mkdirSync(path.join(pack, "dist"), { recursive: true });
       write(path.join(pack, "package.json"), pkg);
       write(path.join(pack, "dist/build-info.json"), info);
-      execFileSync("tar", ["-czf", asset, "-C", tmp, "package"]);
+      execFileSync("tar", ["-czf", filename, "package"], { cwd: tmp });
     };
     const pkg = { name: "ai-bridge", version };
     archive(pkg, build);
@@ -87,7 +87,7 @@ require('node:module').syncBuiltinESMExports();`);
       await rejected();
     }
     fs.rmSync(path.join(pack, "dist/build-info.json"));
-    execFileSync("tar", ["-czf", asset, "-C", tmp, "package"]);
+    execFileSync("tar", ["-czf", filename, "package"], { cwd: tmp });
     await rejected();
     archive(pkg, build);
     await cli("update");

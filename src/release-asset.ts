@@ -16,7 +16,10 @@ export function buildAt(root: string, source = false): Build {
   return { ...build, channel: build.channel ?? (build.commit ? "main" : "dev") };
 }
 export function inspectAsset(file: string, name: string, version: string) {
-  const read = (entry: string) => execFileSync("tar", ["-xOzf", file, "package/" + entry], { encoding: "utf8" });
+  // GNU tar interprets a drive-letter colon in the archive argument as a remote host.
+  const read = (entry: string) => execFileSync("tar", ["-xOzf", path.basename(file), "package/" + entry], {
+    cwd: path.dirname(file), encoding: "utf8",
+  });
   const pkg = JSON.parse(read("package.json"));
   const build = JSON.parse(read("dist/build-info.json"));
   if (pkg.name !== name || pkg.version !== version || build.channel !== "release" || !/^[0-9a-f]{40}$/.test(build.commit))
