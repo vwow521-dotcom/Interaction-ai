@@ -10,18 +10,17 @@
 
 ## 1. 安装（一次）
 
-需要 Node.js 22.13 或更新版本，以及 Git。
+需要 Windows、Node.js 22.13 或更新版本，以及 Git。从 GitHub Release 安装：
 
 ```powershell
-git clone https://github.com/vwow521-dotcom/Interaction-ai.git
-cd Interaction-ai
-npm ci
-node bin/ai-bridge.mjs update
+npm install -g https://github.com/vwow521-dotcom/Interaction-ai/releases/download/v0.13.0/ai-bridge-0.13.0.tgz
 ai-bridge setup
 ai-bridge doctor
 ```
 
-`update` 会把 GitHub 上的 `main` 取到临时目录，然后 `npm ci`（`prepare` 脚本负责构建，并把提交号记进 `dist/build-info.json`，`doctor` 用它判断是否最新）→ `npm pack` → `npm install -g <包>`。只有最后一步才会替换全局安装，前面任何一步失败，旧版都还在。不要用 `npm install -g github:…`：npm 全局安装 git 包时构建拿不到依赖，会失败，而且会先删掉原来的安装。
+也可以先从 [Releases](https://github.com/vwow521-dotcom/Interaction-ai/releases) 页面下载 `ai-bridge-<版本>.tgz`，再 `npm install -g <下载的文件>`。安装包里的 `dist/build-info.json` 记着它构建自哪个提交、是哪个通道（release），`doctor` 和面板顶栏都读它。
+
+想用 main 分支上的开发版，可以克隆仓库后运行 `npm ci`、`node bin/ai-bridge.mjs update --channel main`。它会把 `main` 取到临时目录，构建、打包，最后才替换全局安装，前面任何一步失败旧版都还在。不要用 `npm install -g github:…`：npm 全局安装 git 包时构建拿不到依赖，会失败，而且会先删掉原来的安装。
 
 `setup` 会做下面几件事，每改一个文件都会先在原位置备份（`*.bak-ai-bridge-<时间>`）：
 
@@ -88,9 +87,10 @@ Codex 第一次加入后，要等它结束一轮，hook 才能登记它的对话
 4. 在聊天底部选收件人或在正文 @ 成员，例如 `@codex` 或 `@所有人`。「回复」会引用原消息。输入框下方显示送达预期，消息按收件人显示回执。AI 用 `say` 回复。成员连续互相 @ 达到 `chat.max_agent_turns`（默认 6）后，等你说话才继续叫醒成员。Enter 发送，Shift+Enter 换行。同一标签页内刷新或切换视图会保留聊天、发起和待办草稿。
 5. 办公室的工位可跳到当前任务，或在聊天中预选该成员。成员详情可查看门铃、绑定和送达异常，也能释放身份。顶栏搜索已加载的文件夹、任务、文件和成员，回车打开第一项。主题默认跟随系统，手动选择保存在浏览器中。旧面板可访问 `/v1` 和 `/classic`。
 6. 打回时，你写的备注是「用户要求」，AI 必须做到。审查者的意见分为「阻塞问题」（必须修）和「观察」（可选）。阻塞问题由桥分配任务内编号（如 `T2-B3`），可以附复现命令、执行目录和期望结果；返工 AI 要逐条跑过复现命令，并在交接单的 `addressed` 里按编号说明怎么处理、跑了什么。复审时 AI 要按编号逐条回答「已修复」或「未修复」，漏答、重复或写错编号会被拒绝，错误里会列出缺的编号；上一轮没修好的问题会继续带到下一轮。第一次审查应一次列全，不要每轮再挤出一个新问题。交接卡按编号显示问题、复现命令和状态，复审卡显示「上一轮 N 项：已修复 a，未修复 b；新增 c」。
-7. 审批卡片上的「范围提示」是提醒你：有改动没写进交接单，或者某个阶段改了别的阶段负责的文件（例如编码阶段改了 PLAN.md）。只提示，不阻止。
-8. 审查阶段即使没改文件也会生成一个空提交，`git log` 里能直接看到每一轮的审查结论。
-9. 每个任务有一个不进 git 的共享目录 `.bridge/shared/<运行号>/<任务号>/`，实现方和审查方共用，临时脚本、样例和复现用到的文件都放在这里。任务结束、打回和桥重启都会保留；确认某个运行彻底结束、这些文件不需要留档后，手动删除 `.bridge/shared/<运行号>/` 即可（0.11 不自动清理）。
+7. 交接卡上的提交信息：有提交时显示提交链接；没有提交时，灰色的「未提交：没有文件改动」「未提交：已关闭自动提交」只是说明，不是错误。红字才表示提交出了问题，只会出现在 0.13 之前的旧记录里；0.13 起提交失败不会生成交接，阶段保持进行中，AI 会收到 git 的报错。
+8. 审批卡片上的「范围提示」是提醒你：有改动没写进交接单，或者某个阶段改了别的阶段负责的文件（例如编码阶段改了 PLAN.md）。只提示，不阻止。
+9. 审查阶段即使没改文件也会生成一个空提交，`git log` 里能直接看到每一轮的审查结论。
+10. 每个任务有一个不进 git 的共享目录 `.bridge/shared/<运行号>/<任务号>/`，实现方和审查方共用，临时脚本、样例和复现用到的文件都放在这里。任务结束、打回和桥重启都会保留；确认某个运行彻底结束、这些文件不需要留档后，手动删除 `.bridge/shared/<运行号>/` 即可（0.11 不自动清理）。
 
 ## 5. 开会：先讨论，再并行分派
 
@@ -137,7 +137,7 @@ Codex 第一次加入后，要等它结束一轮，hook 才能登记它的对话
 
 升级 Claude 或 Codex 后，可用 `ai-bridge doctor --probe` 检查 Codex 队列命令的帮助、SQLite 表和会话记录格式，以及当前守护进程收到的 Claude 套接字报告。探针只读。待办中出现「格式可能变了」时，可用同一命令复核。待办和成员详情的「复制叫醒语」优先给相应产品的快捷命令，剪贴板不可用时可以手动复制选中的文字。
 
-`doctor` 会显示已安装的 skill 和产品版本。未验证的产品版本仍可以使用原有门铃。安装版本确认落后于 GitHub main 时，`doctor` 才提示更新。
+`doctor` 会显示已安装的 skill 和产品版本。未验证的产品版本仍可以使用原有门铃。安装版落后于最新 Release（main 通道的安装则是落后于 GitHub main）时，`doctor` 才提示更新。它的「运行中的桥」一节对照正在运行的守护进程和安装版，两者不一致时提示「停掉 ai-bridge 后重新 ai-bridge start」；面板顶栏也显示运行中的版本，如 `v0.13.0 · f4bc0cc`，从源码运行时显示「开发版」。
 
 ## 7. 卸载 / 重装
 
@@ -149,16 +149,19 @@ npm uninstall -g ai-bridge
 ## 8. 更新
 
 ```powershell
-ai-bridge doctor     # 第一行：安装自哪个提交，是否落后于 GitHub main
-ai-bridge update     # 临时目录取 GitHub main → npm ci → npm pack → npm install -g → setup --refresh → doctor
+ai-bridge doctor                  # 安装版和运行中的桥各是哪个版本，是否落后于最新 Release
+ai-bridge update                  # 下载最新 GitHub Release → 核对安装包 → npm install -g → setup --refresh → doctor
+ai-bridge update --channel main   # 临时目录取 GitHub main → npm ci → npm pack → npm install -g → setup --refresh → doctor
 ```
+
+- release 通道（默认）在全局安装之前核对安装包里的包名、版本、`channel: release` 和提交号。没有 Release、找不到唯一的 `ai-bridge-<版本>.tgz`、下载失败或核对不通过时直接退出，旧安装不动，也不会自动改用 main。
 
 - `setup --refresh` 只更新**已经存在**的 bridge 配置，不会新增。你有意删掉的客户端（比如不用 Codex 时删掉的 `[mcp_servers.bridge]`）不会被加回来。要新增客户端就运行一次 `ai-bridge setup`。
 - 全局安装的路径不变，所以更新后客户端配置通常不用改，Codex 的 hook 也不用重新信任。新代码只对**新开的对话**生效。如果桥正在运行，要重新 `ai-bridge start`。
-- 选项：`--ref <分支|标签|提交>` 安装指定版本，`--force` 在已经是最新时也重装，`--dry-run` 只显示会做什么。
+- 选项：`--channel release|main` 选通道，`--ref <分支|标签|提交>` 安装 main 通道上的指定版本（只写 `--ref` 时视为 main 通道，和 `--channel release` 一起写会报错），`--force` 在已经是最新时也重装，`--dry-run` 只显示会做什么。
 - 运行前最好先关掉 Codex，否则 Codex 可能用它内存里的旧配置覆盖 `~/.codex/config.toml`。
 
-在源码仓库里，`npm run reinstall` 会安装**本地工作区**的版本（打包 → 全局安装 → `setup --refresh` → doctor），开发时用。各项目的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
+在源码仓库里，`npm run reinstall` 会安装**本地工作区**的版本（打包 → 全局安装 → `setup --refresh` → doctor），开发时用，通道记为 dev。发布新版本由维护者运行 `node scripts/release.mjs`：先做预检（版本号与锁文件一致、CHANGELOG 有本版本小节、工作区干净），再跑 typecheck、build、smoke，打包并核对安装包，最后只打印 `gh release create …` 命令，由维护者自己执行。加 `--dry-run` 只做预检并列出会打包的文件。各项目的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
 
 ## 9. 后台成员
 

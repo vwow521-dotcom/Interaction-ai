@@ -568,3 +568,95 @@ Feedback.blocking: Issue[]      // 旧库的字符串数组读成 { id: null, pr
 - **旧数据和旧计划**：0.11 的数据库自动补两列（`tasks.dep_basis` 和 `meeting_turns.preview`）后照常运行。不带 `@` 的旧计划仍然等上游任务 done 才开工；但审查优先投递对所有计划都生效：同一个成员同时有待领取的实现和审查时，0.12 先发审查，而 0.11 按创建先后发。smoke 里的 P1–P4 用没有 `@` 的计划覆盖了这个排序。
 - **smoke 分模块**：`scripts/stage-deps-smoke.ts`、`scripts/busy-smoke.ts`、`scripts/plan-preview-smoke.ts` 各自使用自己的临时夹具。主脚本 `scripts/smoke.ts` 里每个模块只有一行动态 import。接入这一行时按纪要第 4 节的顺序操作：先申请临时租约，再随交接提交，然后释放租约。这一版的三次接入都实测过这套流程。
 - **端口**：两名成员同时跑完整 smoke 时会抢默认的 7891 端口，各自用 `SMOKE_PORT` 指定一个空闲端口即可。
+
+## 27. 第一个正式发布版（0.13）
+
+0.13 是第一次给别人下载、安装和更新的版本。规格以会议 #6 的纪要（`doc/meetings/2026-11-23-m6-0.13.0-第一个正式发布版.md`）为准，本节记录实现。
+
+### 27.1 发布前修复（`f5ea68b`）
+
+- **提交失败**：`scopeAndCommit` 区分真正的 git 错误和跳过。真正的错误（提交钩子失败，或 `status`、`diff`、`commit` 本身失败）返回错误，带上 git 输出的前 4000 字，不写交接；任务信保持已取走，阶段保持 `in_progress`，记 `commit_failed` 日志和事件。跳过（范围内没有改动、关闭了自动提交、不是仓库）照常推进。`commitPaths` 先 add 再 commit，失败时文件留在暂存区，重试会重新 add。
+- **通配符**：`globMatch` 把 `**/` 换成 `(?:[^/]+/)*`，末尾的 `**` 仍是 `.*`，`src/**/index.ts` 不再匹配 `src/tools/myindex.ts`。
+- **租约升级**：`renewLease` 用一条 SQL 同时更新模式和到期时间，回执取数据库里实际保存的值；从共享改为独占时，原有的冲突检查会拦下其他成员的共享租约。
+- 所有 git 调用都加了 `LC_ALL=C`，以便按英文报错判断「不是 git 仓库」。中文提交标题、正文和中文文件名不受影响。回归测试见 `scripts/handoff-lease-smoke.ts`。
+
+### 27.2 提交说明（`commit_note`）
+
+- `store.parseHandoff` 只按持久化的 `handoffs.commit_error` 文字拆分，不看 `commit_sha`：
+  - 原文精确以全角「未提交：」开头（`COMMIT_NOTE_PREFIX`）时，`commit_note` = 原文，`commit_error` = null；
+  - 其他非空文字是 0.13 之前的真实错误，留在 `commit_error`；
+  - 空值时两者都是 null。
+- 单条、列表、待审批、分页这几条读取路径都经过 `parseHandoff`，所以 `/api/state.handoffs`（`/classic` 读它）、文件夹接口和 `room.handoff()` 给出的是同一份拆分。表结构不变。`submit_handoff` 返回的 `commit_note` 也不变。
+- 面板：提交链接、`commit_error`、`commit_note` 三段各自渲染，带 SHA 的旧记录也能同时看到文字。`commit_note` 用中性样式（主面板 `muted`，`/v1` 用 `sub`），`commit_error` 仍是错误样式（`bad`、`form-error`、`err`）。
+
+### 27.3 版本核对
+
+- **`/api/state.daemon`**：守护进程启动时读一次，之后不变：
+
+  ```ts
+  daemon: {
+    version: string,                      // package.json
+    commit: string,                       // 完整 SHA；从 src 用 tsx 运行时为 "dev"
+    dirty: boolean | null,                // 源码运行为 null
+    channel: "release" | "main" | "dev",  // 源码运行为 "dev"；旧安装包缺 channel 时为 "main"
+    built_at: string | null,              // UTC ISO；源码运行为 null
+    started_at: string,                   // UTC ISO
+    project: string, port: number, install_dir: string
+  }
+  ```
+
+  从源码运行的判断依据是守护进程模块以 `.ts` 结尾，这样工作树里残留的旧 `dist/build-info.json` 不会被误读。
+- **构建通道**：`scripts/build-info.mjs` 把环境变量 `BRIDGE_BUILD_CHANNEL`（release、main 或 dev，缺省为 dev）写进 `dist/build-info.json`。`release.mjs` 打包时设为 release，`update --channel main` 设为 main，`npm run reinstall` 保持 dev。
+- **`doctor`**：
+  - 先列出 CLI 的版本、提交号和通道，再按通道与远端比较：release 和最新 Release 的版本比；main（以及缺 channel 但有 SHA 的旧安装）和 main 的提交比，沿用第 21 节的 Compare API；dev 只显示。
+  - 新增「运行中的桥」一节：读 `/api/state.daemon`，和 CLI 自己的版本、提交号对照，不一致时提示「停掉 ai-bridge 后重新 ai-bridge start」。旧守护进程没有这个字段时，报告「版本未知（0.12 或更早），建议重启后核对」。
+- **面板**：顶栏 `.brand` 里的 `#daemon-version` 显示 `v0.13.0 · 短 SHA`，源码运行时显示「开发版」，悬停显示完整 SHA、通道和启动时间；没有 `daemon` 字段时隐藏。由 `panel/js/main.js` 和项目名一起填写。
+
+### 27.4 发布与更新
+
+- **`ai-bridge update [--channel release|main] [--ref <ref>] [--force] [--dry-run]`**：
+  - 默认走 release 通道。只写 `--ref` 时视为 main；`--channel release` 和 `--ref` 同时出现，或者 `--channel` 写了未知值，直接报错。
+  - release 通道的步骤：
+    1. 请求 `<API>/repos/<REPO>/releases/latest`，`<API>` 默认是 `https://api.github.com`，可用 `BRIDGE_RELEASE_API` 换成测试服务；拒绝 draft 和 prerelease；
+    2. 在资产里找唯一一个 `ai-bridge-<版本>.tgz`，版本取 tag 去掉开头的 `v`，命名规则在 `src/release-asset.ts`；
+    3. 下载到临时目录，用 `tar` 读包内的 `package.json` 和 `dist/build-info.json`，核对名称、版本、`channel: release` 和 40 位提交号。`tar` 在安装包所在目录运行、只传文件名，因为 Git Bash 里的 GNU tar 会把盘符冒号当成远程主机；
+    4. 全部通过后才 `npm install -g`，然后 `setup --refresh`、`doctor`。
+  - 任何一步失败都在全局安装之前退出，不自动改用 main。已安装的是同一版本、通道也是 release 时跳过，`--force` 可强制重装。
+  - main 通道保留原流程（临时检出 → `npm ci` → pack → install），给构建加上 `BRIDGE_BUILD_CHANNEL=main`。
+- **`node scripts/release.mjs [--dry-run]`**，任何一项失败都以非 0 退出：
+  - 预检（两种模式都做，可以离线重复）：版本是合法的 semver，`package-lock.json` 两处的版本与 `package.json` 一致；`CHANGELOG.md` 有本版本的非空小节（`## <版本>` 或 `## [<版本>]`）；工作区干净，未跟踪的文件也算。
+  - `--dry-run`：在临时副本里用 `npm pack --dry-run --json --ignore-scripts` 列出文件清单，不在工作树里触发 prepare，然后打印后续步骤。
+  - 正式模式：本地和远端都还没有 tag `v<版本>`（远端查不了时只给警告）→ typecheck、build、smoke → 设 `BRIDGE_BUILD_CHANNEL=release` 后 `npm pack --pack-destination release` → 核对包内 build-info（提交号等于 HEAD、`dirty: false`）、入口文件、双语 README、CHANGELOG 和 README 引用的图 → 把本版本的 CHANGELOG 小节写到 `release/notes-<版本>.md`。
+  - 最后只打印 `gh release create v<版本> release/ai-bridge-<版本>.tgz --title … --notes-file …`，永不执行。发布由用户自己做。
+- `package.json` 的 `files` 加上 `README.en.md`、`CHANGELOG.md` 和 `docs/images`。
+
+### 27.5 测试
+
+- `scripts/commit-note-smoke.ts`：
+  - 关闭自动提交后做一次交接，核对 `commit_note`；
+  - 往旧库直接插入多种历史记录：真实错误、空串、null、带 SHA 的跳过原因、带 SHA 的错误、冒号不是全角的写法；
+  - 核对 `/api/state` 和文件夹接口给出的拆分一致；
+  - 用真实的 `handoffCard`、`handoffRow` 渲染并检查样式；`/v1` 和 `/classic` 检查发出去的分支代码。
+- `scripts/release-smoke.ts`：
+  - 核对真实守护进程的 `daemon` 九个字段；
+  - 用临时仓库验证 `release.mjs --dry-run` 的通过和拒绝；
+  - 用本地 HTTP 假服务和假 npm 验证 release 通道的下载、核对和安装顺序，以及失败时全局安装命令一次都没有调用；
+  - 验证 `doctor` 能报出运行版和安装版不一致。
+- `scripts/smoke-wait.ts`：新增 `waitFor(read, description, timeoutMs, intervalMs)`，超时时报出最后一次读到的值；`read` 抛出的异常直接向上传。重启守护进程之后的两处固定等待（hook 重新挂上、代理恢复绑定）改为轮询，失败时把原因打到输出里。
+- **退出诊断**：smoke 开头打印临时项目和进度日志的路径。每条 check 同步追加到 Git 夹具之外的 `bridge-smoke-progress-*/smoke-progress.log`，非 0 退出时打印最后一条 check；守护进程不是由 `stopDaemon` 停掉、而是自己退出时，打印退出码和最后 3000 字输出。
+- **已知问题**：smoke 偶尔以 0xC0000409 原生崩溃，没有 JS 异常，位置也不固定。0.13 的实装演示中，一个使用 `fetch` 的脚本在 `process.exit` 时打印过 libuv 断言 `!(handle->flags & UV_HANDLE_CLOSING)`（`src\win\async.c`），abort 在 Windows 上的退出码正是 0xC0000409。初步判断是进程退出时仍有正在关闭的句柄（Node 24 的 Windows 已知类问题），根因还没确认。
+
+### 27.6 实装验收
+
+用 `npm pack` 打出的候选包（`BRIDGE_BUILD_CHANNEL=release`），装到隔离的 `npm --prefix` 目录，并把 `USERPROFILE`、`HOME`、`CODEX_HOME` 都指向隔离目录，在 7879 上走了一遍：
+
+1. `setup` 只写了隔离目录里的 `.claude.json`、`.codex/config.toml`、`hooks.json` 和两个 skill；
+2. `init` 初始化演示项目；
+3. `start` 启动后，`/api/state.daemon` 的 `channel` 是 release，`commit` 等于打包时的 HEAD；
+4. 两个成员加入；
+5. 会议定稿带出 4 波的并行预览，人工批准；
+6. 实现交接自动提交；审查以两个编号问题打回，人工确认打回；
+7. 审查期间另一成员带 `busy_minutes` 汇报，办公室显示长命令那一行；
+8. `doctor` 显示「安装版与运行版一致」。此时仓库还没有发布 Release，「最新 Release」一项报 HTTP 404。
+
+README 的四张截图（`docs/images/`）就是这次操作中，用无头 Edge 按 1280 宽截取的，只含演示数据。
