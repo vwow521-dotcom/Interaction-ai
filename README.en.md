@@ -100,14 +100,19 @@ Each project's `.bridge/` data and `bridge.config.yaml` are left in place.
   - `~/.codex/config.toml`: registers `[mcp_servers.bridge]`;
   - `~/.codex/skills/bridge/`: the `$bridge` skill;
   - `~/.codex/hooks.json`: the user-level Stop hook. It only holds conversations that called the bridge's `join`; every other conversation is let go immediately.
+- **Files in existing projects**: `setup` and `uninstall` also check the projects registered in `~/.codex/config.toml` (`[projects.'<path>']`, plus any directory passed with `--project`). If `<project>/.codex/hooks.json` still holds the project-level Stop hook left by an older bridge version, they remove it: the whole file if that hook is all it holds, otherwise just that entry. These files are backed up first too. Projects without the old hook are not touched. Add `--dry-run` to see what would change.
 - **Data in your project**: It lives in `<project>/.bridge/` (the SQLite database, logs and shared folders), which ships its own `.gitignore`. The bridge commits every handoff automatically under your Git identity.
-- **No telemetry**: Only two commands use the network, and both talk only to GitHub: `doctor` reads the latest commit or Release, and `update` downloads the package.
+- **Network access**:
+  - **No telemetry**: The bridge reports no usage data. The daemon, panel and doorbells only talk on this machine.
+  - **Version checks**: `doctor` calls the GitHub API (`api.github.com`) to read the latest Release, or the latest main commit when the install is from the main channel.
+  - **Downloading updates**: `update` on the default channel calls the GitHub API and downloads the Release package from GitHub. `--channel main` fetches the code from `github.com`.
+  - **Installing dependencies**: The `npm install -g` in the first install and in `update` downloads dependencies from the registry configured in npm (`npm config get registry`). `--channel main` also runs `npm ci`, which downloads from the addresses recorded in the repository's `package-lock.json`, currently `registry.npmmirror.com`. If you maintain a firewall allowlist, include all of these.
 - **Background member permissions**: By default the bridge answers every ACP permission request with "reject once". `permissions: allow` approves them automatically, which can let the agent run commands or touch files outside the project. Use it only in projects you trust.
 
 ## FAQ
 
 - **"X can't be woken" (叫不醒)**: X's conversation was most likely closed or disconnected. Open it and say "continue"; its first tool call restores the identity and picks up the queued mail.
-- **Port already in use**: `ai-bridge start` shows which project the bridge on that port is running for. Open that panel, or pass `--port` to use another port.
+- **Port already in use**: `ai-bridge start` shows which project the bridge on port 7878 is running for. The Claude and Codex proxies, the Stop hook and `doctor` all connect to `127.0.0.1:7878` by default, so the project you want the AIs to join must run on 7878: stop the old bridge, then `ai-bridge start` your project. Run `ai-bridge doctor` afterwards and check that the 运行中的桥 (Running bridge) section shows that project. Use `--port` only to open a separate panel for looking at another project; the AIs won't connect there.
 - **Version mismatch**: When the 运行中的桥 (Running bridge) section of `doctor` shows `✗`, stop `ai-bridge` and run `ai-bridge start` again. The panel's top bar also shows the running version.
 - **`doctor` says it cannot read the latest Release**: Either no Release has been published yet, or GitHub could not be reached. This only affects the "is it up to date" check; every other check still runs.
 
@@ -119,4 +124,4 @@ To be decided (TBD).
 
 - [Changelog](CHANGELOG.md)
 - [Usage and troubleshooting](docs/USAGE.md) (Chinese)
-- [Architecture](docs/ARCHITECTURE-v2.md) and [design decisions](docs/DESIGN.md) (Chinese)
+- [Architecture](https://github.com/vwow521-dotcom/Interaction-ai/blob/main/docs/ARCHITECTURE-v2.md) and [design decisions](https://github.com/vwow521-dotcom/Interaction-ai/blob/main/docs/DESIGN.md) (Chinese)

@@ -100,14 +100,19 @@ npm uninstall -g ai-bridge
   - `~/.codex/config.toml`：注册 `[mcp_servers.bridge]`；
   - `~/.codex/skills/bridge/`：`$bridge` skill；
   - `~/.codex/hooks.json`：用户级 Stop hook。它只拦下调用过 bridge `join` 的对话，其他对话结束时立即放行。
+- **已有项目里的文件**：`setup` 和 `uninstall` 还会检查 `~/.codex/config.toml` 里登记过的项目（`[projects.'<路径>']`，以及用 `--project` 指定的目录）。如果 `<项目>/.codex/hooks.json` 里有旧版协作桥留下的项目级 Stop hook，就把它删掉：文件里只剩这个 hook 时删掉整个文件，否则只删这一项。同样先备份。没有旧 hook 的项目不会被改动。想先看会改什么，可以加 `--dry-run`。
 - **项目里的数据**：存在 `<项目>/.bridge/`，包括 SQLite 数据库、日志和共享目录，并由它自带的 `.gitignore` 排除。协作桥会以你的 Git 身份自动提交每次交接。
-- **没有遥测**：只有两条命令会访问网络，而且都只访问 GitHub：`doctor` 读取最新的提交或 Release，`update` 下载安装包。
+- **网络访问**：
+  - **没有遥测**：协作桥不上报任何使用数据。守护进程、面板和门铃只在本机通信。
+  - **版本查询**：`doctor` 调用 GitHub API（`api.github.com`），读取最新 Release；main 通道的安装则读取 main 的提交。
+  - **下载更新**：`update` 默认通道调用 GitHub API，并从 GitHub 下载 Release 安装包。`--channel main` 会从 `github.com` 取代码。
+  - **依赖安装**：首次安装和 `update` 的 `npm install -g` 会从你在 npm 里配置的 registry（`npm config get registry`）下载依赖。`--channel main` 还会运行 `npm ci`，它按仓库 `package-lock.json` 里记录的地址下载依赖，目前是 `registry.npmmirror.com`。要配置防火墙白名单，请把以上地址都算进去。
 - **后台成员的权限**：默认对 ACP 权限请求自动「拒绝一次」。改成 `permissions: allow` 会自动批准，代理可能执行命令、访问项目外的文件。只在可信的项目里这样设置。
 
 ## 常见问题
 
 - **「X 叫不醒」**：多半是 X 的对话被关掉或断开了。打开那个对话说一句「继续」，它的第一次工具调用会恢复身份、取走排队的信。详见[使用说明 · 异常情况](docs/USAGE.md#6-异常情况)。
-- **端口被占用**：`ai-bridge start` 会显示占用端口的协作桥在为哪个项目运行。可以打开那个面板，或者用 `--port` 换一个端口。
+- **端口被占用**：`ai-bridge start` 会显示占用 7878 端口的协作桥在为哪个项目运行。Claude 和 Codex 的转接程序、Stop hook 以及 `doctor` 默认都连 `127.0.0.1:7878`，所以想让 AI 加入的项目必须跑在 7878 上：先停掉旧的桥，再 `ai-bridge start` 你的项目。之后运行 `ai-bridge doctor`，确认「运行中的桥」一节显示的是这个项目。`--port` 换端口只适合另开一个面板查看别的项目，AI 不会连到那里。
 - **版本不一致**：`doctor` 的「运行中的桥」一节显示 `✗ 安装版和运行版不同` 时，停掉 `ai-bridge` 后重新 `ai-bridge start`。面板顶栏也显示正在运行的版本。
 - **`doctor` 提示「无法读取最新正式 Release」**：仓库还没有发布 Release，或者访问 GitHub 失败。这只影响「是否最新」这一项检查，其他检查照常。
 
@@ -119,4 +124,4 @@ npm uninstall -g ai-bridge
 
 - [更新记录](CHANGELOG.md)
 - [使用说明与故障排查](docs/USAGE.md)
-- [当前架构](docs/ARCHITECTURE-v2.md)与[设计决策](docs/DESIGN.md)
+- [当前架构](https://github.com/vwow521-dotcom/Interaction-ai/blob/main/docs/ARCHITECTURE-v2.md)与[设计决策](https://github.com/vwow521-dotcom/Interaction-ai/blob/main/docs/DESIGN.md)

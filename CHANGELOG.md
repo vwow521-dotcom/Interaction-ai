@@ -1,6 +1,6 @@
 # 更新记录
 
-每个版本一两句话。细节见 [docs/ARCHITECTURE-v2.md](docs/ARCHITECTURE-v2.md) 第 20 到 27 节。
+每个版本一两句话。细节见 [docs/ARCHITECTURE-v2.md](https://github.com/vwow521-dotcom/Interaction-ai/blob/main/docs/ARCHITECTURE-v2.md) 第 20 到 27 节。
 
 ## 0.13.0
 
