@@ -47,10 +47,12 @@ export function handoffCard(item, anchor, rejectStage) {
   const stage = [item.task?.key, item.stage_role].filter(Boolean).join(" ");
   const verdict = data.verdict === "approve" ? label("审查通过", "good") : data.verdict === "reject" ? label("建议打回", "bad") : "";
   const mark = gate ? label("待你审批", "urgent") : label("交接");
-  const commit = item.commit_sha
-    ? '<a href="/api/commits/' + esc(item.commit_sha) + '" target="_blank" rel="noopener">提交 ' + esc(item.commit_sha.slice(0, 8)) + "</a>"
-    : item.commit_error ? '<span class="bad">' + esc(item.commit_error) + "</span>"
-    : item.commit_note ? '<span class="muted">' + esc(item.commit_note) + "</span>" : "";
+  // The link and the text are independent: an old row can carry a SHA next to a note or an error.
+  const commit = [
+    item.commit_sha ? '<a href="/api/commits/' + esc(item.commit_sha) + '" target="_blank" rel="noopener">提交 ' + esc(item.commit_sha.slice(0, 8)) + "</a>" : "",
+    item.commit_error ? '<span class="bad">' + esc(item.commit_error) + "</span>" : "",
+    item.commit_note ? '<span class="muted">' + esc(item.commit_note) + "</span>" : "",
+  ].filter(Boolean).join(" · ");
   const basis = gate?.feedback;
   const rechecks = new Map(data.rechecks?.map((entry) => [entry.id, entry]));
   const requirements = list(basis?.user_requirements) + issueList(basis?.blocking?.map((issue) =>

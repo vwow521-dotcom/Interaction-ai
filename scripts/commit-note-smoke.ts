@@ -57,6 +57,7 @@ export async function smokeCommitNote({ root, startDaemon, stopDaemon, connect, 
       { sha: null, text: null, summary: "null" },
       { sha: "0123456789abcdef0123456789abcdef01234567", text: "未提交：没有文件改动", summary: "有 SHA 的旧跳过原因" },
       { sha: null, text: "未提交 没有全角冒号", summary: "前缀不精确" },
+      { sha: "fedcba9876543210fedcba9876543210fedcba98", text: "git commit 失败：带 SHA 的旧错误", summary: "有 SHA 的旧错误" },
     ];
     for (const row of rows)
       insert.run(base.run_id, base.attempt_id, base.stage_id, base.agent, JSON.stringify({ ...JSON.parse(base.data), summary: row.summary }),
@@ -74,6 +75,7 @@ export async function smokeCommitNote({ root, startDaemon, stopDaemon, connect, 
       ["null", null, null],
       ["有 SHA 的旧跳过原因", null, rows[3].text],
       ["前缀不精确", rows[4].text, null],
+      ["有 SHA 的旧错误", rows[5].text, null],
     ];
     check(expect.every(([summary, error, note]) => by(summary)?.commit_error === error && by(summary)?.commit_note === note
       && fromFolder(summary)?.commit_error === error && fromFolder(summary)?.commit_note === note),
@@ -95,11 +97,18 @@ export async function smokeCommitNote({ root, startDaemon, stopDaemon, connect, 
       && error.includes('<span class="bad">git commit 失败') && error.includes('<p class="form-error">git commit 失败')
       && !neither.includes("commit-note") && !neither.includes("form-error\">"),
       "the main panel shows a commit note in the muted style and keeps real errors red");
+    // An old row can carry a SHA and a note or an error at once: the link must not hide the text (T1-B1).
+    const shaNote = handoffCard(fromFolder("有 SHA 的旧跳过原因"), "h", null).heading;
+    const shaError = handoffCard(fromFolder("有 SHA 的旧错误"), "h", null).heading;
+    check(shaNote.includes("/api/commits/0123456789abcdef") && shaNote.includes('<span class="muted">未提交：没有文件改动</span>')
+      && shaError.includes("/api/commits/fedcba9876543210") && shaError.includes('<span class="bad">git commit 失败：带 SHA 的旧错误</span>'),
+      "a card with a SHA still shows the commit note or the old error next to the link");
     const v1 = fs.readFileSync(path.join(root, "panel/v1/room.js"), "utf8");
     // Both are browser scripts without a module export, so check the shipped branch text.
-    check(/commit_error \? '<span class="err">'[^\n]*commit_note \? '<span class="sub">'/.test(v1)
-      && /commit_error \? '<span class="err">'[^\n]*esc\(h\.commit_note \|\| ""\)/.test(PANEL_HTML),
-      "/v1 and /classic render commit_error with the error class and commit_note as plain muted text");
+    // Link, error and note are three independent parts of one list, not a ternary chain where the SHA wins.
+    check(/\[it\.commit_sha \?[^\n]*: "",\s*it\.commit_error \? '<span class="err">'[^\n]*: "", it\.commit_note \? '<span class="sub">'[^\n]*\]\.filter\(Boolean\)/.test(v1)
+      && /\[h\.commit_sha \?[^\n]*: "",\s*h\.commit_error \? '<span class="err">'[^\n]*: "", esc\(h\.commit_note \|\| ""\)\]\.filter\(Boolean\)/.test(PANEL_HTML),
+      "/v1 and /classic render the link, the error (error class) and the note (muted) independently");
   } finally {
     await client?.close().catch(() => {});
     await stopDaemon();

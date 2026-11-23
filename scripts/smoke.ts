@@ -30,6 +30,15 @@ const PORT = Number(process.env.SMOKE_PORT ?? 7891);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = process.cwd();
 const proj = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-"));
+// Exit diagnostics: a native crash (e.g. 0xC0000409) skips JS handlers, so every check is also appended
+// synchronously to a progress file; the project path is printed first so the file can be found afterwards.
+// Outside the fixture repository: the Git cases commit and diff everything in `proj`.
+const progressLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-progress-")), "smoke-progress.log");
+let lastCheck = "(none yet)";
+console.log("smoke project:", proj, "· progress log:", progressLog);
+process.on("exit", (code) => {
+  if (code !== 0) console.error(`smoke exiting with code ${code}; last check: ${lastCheck}; progress log: ${progressLog}`);
+});
 const sh = (...args: string[]) => execFileSync("git", ["-C", proj, ...args], { encoding: "utf8" }).trim();
 sh("init", "-q");
 sh("config", "user.name", "bridge-smoke");
@@ -99,15 +108,25 @@ async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<s
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
   daemon.stderr!.on("data", (d) => (out += d));
+  const child = daemon;
+  // A daemon that dies without stopDaemon() asking it to is reported with its exit code and last output.
+  child.once("exit", (code, signal) => {
+    if (stopping.has(child)) return;
+    const line = `daemon on ${PORT} exited unexpectedly (code ${code}, signal ${signal}); last check: ${lastCheck}`;
+    console.error(line + "\n" + out.slice(-3000));
+    try { fs.appendFileSync(progressLog, line + "\n" + out.slice(-3000) + "\n"); } catch {}
+  });
   for (let i = 0; i < 100; i++) {
     if (out.includes("面板:")) return;
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("daemon did not start:\n" + out);
 }
+const stopping = new WeakSet<ChildProcess>();
 async function stopDaemon() {
   if (!daemon || daemon.exitCode !== null || daemon.signalCode !== null) return;
   const child = daemon;
+  stopping.add(child);
   const exited = new Promise((resolve) => child.once("exit", resolve));
   const timeout = setTimeout(() => child.kill(), 10_000).unref();
   if (child.connected) child.send("shutdown", (error) => { if (error) child.kill(); });
@@ -147,8 +166,15 @@ const inboxItem = (s: any, kind: string, agent?: string) =>
 const inboxContext = (s: any, item: any) => item && s.timeline.find((it: any) => it.type === item.ref.type &&
   (it.type === "round" ? it.meeting_id === item.ref.meeting_id && it.round === item.ref.round : it.id === item.ref.id));
 let failed = false;
+/** A restart wait that timed out or whose read threw: keep waitFor's message (last value read) or the original error in the output. */
+function reportWait(error: unknown) {
+  const text = error instanceof Error ? error.stack ?? error.message : String(error);
+  console.log("     " + text.split("\n").join("\n     "));
+}
 function check(cond: unknown, msg: string) {
   console.log(cond ? "ok  " : "FAIL", msg);
+  lastCheck = (cond ? "ok " : "FAIL ") + msg;
+  try { fs.appendFileSync(progressLog, `${new Date().toISOString()} ${lastCheck}\n`); } catch {}
   if (!cond) failed = true;
 }
 const write = (f: string, s: string) => fs.writeFileSync(path.join(proj, f), s);
@@ -841,7 +867,7 @@ try {
     return waitFor(async () => {
       const agent = (await state()).agents.find((a: any) => a.id === "pbot");
       return agent.binding && agent.doorbellArmed ? agent.binding.session as string : null;
-    }, "pbot binding and doorbell", 20_000, 100).catch(() => null);
+    }, "pbot binding and doorbell", 20_000, 100).catch((error) => (reportWait(error), null));
   }
   async function checkProxyDelivery(client: Client, message: string) {
     const before = frames.length;
@@ -1026,7 +1052,7 @@ try {
   await sleep(3000);
   await startDaemon();
   // The hook retries every 2 s; poll for it instead of a fixed sleep (a slow run once missed a 4 s window).
-  const rearmed = await waitFor(async () => (await state()).agents.find((a: any) => a.id === "hbot2").doorbellArmed, "parked hook was not re-armed after bridge restart", 20_000, 200).catch(() => false);
+  const rearmed = await waitFor(async () => (await state()).agents.find((a: any) => a.id === "hbot2").doorbellArmed, "parked hook was not re-armed after bridge restart", 20_000, 200).catch((error) => (reportWait(error), false));
   check(rearmed, "parked hook re-armed after bridge restart");
   await api("/api/mail", { to: "hbot2", text: "重启后的信" });
   h = await survivor;

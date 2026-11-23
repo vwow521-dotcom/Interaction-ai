@@ -200,8 +200,8 @@
     const d = it.data, key = "h" + it.id, open = ui.expanded.has(key) || !!it.gate;
     const label = (it.task ? it.task.key + " " + it.task.title + " · " : "") + it.stage_id;
     const verdict = d.verdict ? (d.verdict === "approve" ? '<span class="verdict-ok">审查通过</span> · ' : '<span class="verdict-bad">审查打回</span> · ') : "";
-    const commit = it.commit_sha ? '<a href="/api/commits/' + esc(it.commit_sha) + '" target="_blank" rel="noopener">' + esc(it.commit_sha.slice(0, 8)) + "</a>"
-      : it.commit_error ? '<span class="err">' + esc(it.commit_error) + "</span>" : it.commit_note ? '<span class="sub">' + esc(it.commit_note) + "</span>" : "";
+    const commit = [it.commit_sha ? '<a href="/api/commits/' + esc(it.commit_sha) + '" target="_blank" rel="noopener">' + esc(it.commit_sha.slice(0, 8)) + "</a>" : "",
+      it.commit_error ? '<span class="err">' + esc(it.commit_error) + "</span>" : "", it.commit_note ? '<span class="sub">' + esc(it.commit_note) + "</span>" : ""].filter(Boolean).join(" · ");
     const files = (d.files_changed || []).length ? " · " + esc(d.files_changed.slice(0, 4).join("、")) + (d.files_changed.length > 4 ? " 等 " + d.files_changed.length + " 个" : "") : "";
     const hasMore = (d.done && d.done.length) || (d.todo && d.todo.length) || (d.decisions && d.decisions.length) || d.notes_for_next || (d.review_comments && d.review_comments.length) || (d.observations && d.observations.length) || (it.scope_notes && it.scope_notes.length);
     let gate = "";
