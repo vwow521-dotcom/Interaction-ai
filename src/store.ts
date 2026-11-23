@@ -681,8 +681,8 @@ export class Store {
   releaseLease(id: number) {
     this.exec("UPDATE leases SET released_at = ? WHERE id = ? AND released_at IS NULL", now(), id);
   }
-  setLeaseExpiry(id: number, expires_at: string | null) {
-    this.exec("UPDATE leases SET expires_at = ? WHERE id = ?", expires_at, id);
+  renewLease(id: number, exclusive: boolean, expires_at: string) {
+    return this.one<Lease>("UPDATE leases SET exclusive = ?, expires_at = ? WHERE id = ? RETURNING *", exclusive ? 1 : 0, expires_at, id)!;
   }
 
   // ---- meetings

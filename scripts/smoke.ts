@@ -1643,6 +1643,7 @@ notify: { enabled: false }
   await (await import("./busy-smoke.js")).smokeBusy({ base: BASE, startDaemon, stopDaemon, api, call, check });
   await smokeAcpProcess({ root: ROOT, port: PORT, check });
   await (await import("./stage-deps-smoke.js")).smokeStageDeps({ root: ROOT, port: PORT, check });
+  await (await import("./handoff-lease-smoke.js")).smokeHandoffLeases({ startDaemon, stopDaemon, connect, call, api });
   await (await import("./plan-preview-smoke.js")).smokePlanPreview({ root: ROOT, base: BASE, startDaemon, stopDaemon, api, call, check });
 } catch (e) {
   console.error(e);

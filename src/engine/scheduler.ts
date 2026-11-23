@@ -449,7 +449,8 @@ export class Scheduler {
 
   /** Decide what the handoff commits and what to tell the human about scope. */
   private async scopeAndCommit(run: Run, task: Task, attempt: Attempt, stage: TaskStage, agent: string, data: HandoffData, scope_notes: string[]) {
-    const changed = await changedFiles(this.ctx.cfg.projectDir);
+    const { paths: changed, error } = await changedFiles(this.ctx.cfg.projectDir);
+    if (error && this.ctx.cfg.git.auto_commit) return { failure: error.slice(0, 4000) };
     const declared = new Set(data.files_changed.map(norm));
     const tasks = this.ctx.store.tasks(run.id);
     const parallel = new Map(tasks.filter((t) => t.id !== task.id && t.status === "active").map((t) => [t.id, t]));
@@ -504,7 +505,7 @@ export class Scheduler {
     }
 
     let commit_sha: string | null = null;
-    let commit_error: string | null = null;
+    let commit_error: string | null = this.ctx.cfg.git.auto_commit ? null : "未提交：已关闭自动提交";
     if (this.ctx.cfg.git.auto_commit && this.ctx.store.attempt(attempt.id)?.status === "in_progress") {
       const multi = tasks.length > 1;
       const verdictText = data.verdict === "approve" ? "审查通过 — " : data.verdict === "reject" ? "审查打回 — " : "";
@@ -521,7 +522,7 @@ export class Scheduler {
         ? await commitPaths(this.ctx.cfg.projectDir, toCommit.map((f) => `:(top,literal)${f}`), subject, body, { allowEmpty })
         : await commitAll(this.ctx.cfg.projectDir, subject, body, { allowEmpty });
       if ("sha" in r) commit_sha = r.sha;
-      else if ("error" in r) commit_error = r.error;
+      else if ("error" in r) return { failure: r.error.slice(0, 4000) };
       else commit_error = `未提交：${r.skipped}`;
     }
     return { commit_sha, commit_error, scope_notes, scoped: !!toCommit };
@@ -577,6 +578,11 @@ export class Scheduler {
     this.committing.set(a.id, commit);
     const committed = await commit.finally(() => this.committing.delete(a.id));
     if (!committed || this.ctx.store.attempt(a.id)?.status !== "in_progress") return err("这个阶段已停止或被替换，交接未推进流程。");
+    if (committed.failure !== undefined) {
+      this.ctx.log("commit_failed", { run: run.id, task: task.key, agent, error: committed.failure });
+      this.ctx.event(run.id, agent, "commit_failed", committed.failure);
+      return err(committed.failure + "。修复后再次调用 submit_handoff。");
+    }
     const { commit_sha, commit_error, scope_notes } = committed;
 
     const h = this.ctx.store.addHandoff({ run_id: run.id, attempt_id: a.id, stage_id: stage.id, agent, data, commit_sha, commit_error, scope_notes });

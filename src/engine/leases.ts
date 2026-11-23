@@ -136,9 +136,9 @@ export class Leases {
     const granted: Result[] = [];
     for (const g of clean) {
       const same = open.find((l) => l.glob.toLowerCase() === g.toLowerCase() && l.task_id === (task?.id ?? null));
-      if (same) this.ctx.store.setLeaseExpiry(same.id, expires);
+      const renewed = same && this.ctx.store.renewLease(same.id, exclusive, expires);
       const id = same?.id ?? this.ctx.store.addLease({ run_id: run?.id ?? null, task_id: task?.id ?? null, agent, glob: g, exclusive: exclusive ? 1 : 0, reason, expires_at: expires });
-      granted.push({ lease_id: id, glob: g, exclusive, expires_at: expires, renewed: !!same });
+      granted.push({ lease_id: id, glob: g, exclusive: renewed ? !!renewed.exclusive : exclusive, expires_at: renewed?.expires_at ?? expires, renewed: !!renewed });
     }
     this.ctx.log("lease_granted", { agent, globs: clean, task: task?.key, ttl });
     this.ctx.event(run?.id ?? null, agent, "lease", `${agent} 租下 ${clean.join("、")}${exclusive ? "（独占）" : "（共享）"}，${Math.round(ttl / 60)} 分钟`);

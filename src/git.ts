@@ -3,11 +3,11 @@ import { execFile, execFileSync } from "node:child_process";
 
 const MAX_BUFFER = 32 * 1024 * 1024;
 
-function git(cwd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
+function git(cwd: string, args: string[]): Promise<{ ok: boolean; code: number | string | undefined; out: string }> {
   return new Promise((resolve) => {
-    execFile("git", ["-C", cwd, ...args], { maxBuffer: MAX_BUFFER, windowsHide: true }, (err, stdout, stderr) =>
+    execFile("git", ["-C", cwd, ...args], { maxBuffer: MAX_BUFFER, windowsHide: true, env: { ...process.env, LC_ALL: "C" } }, (err, stdout, stderr) =>
       // trimEnd only: `git status --porcelain` lines start with a significant space.
-      resolve({ ok: !err, out: (err ? stderr || err.message : stdout).toString().trimEnd() }),
+      resolve({ ok: !err, code: err?.code, out: (err ? [stderr, stdout].filter(Boolean).join("\n") || err.message : stdout).toString().trimEnd() }),
     );
   });
 }
@@ -28,9 +28,11 @@ const changedFileArgs = ["--no-optional-locks", "status", "--porcelain=v1", "-z"
 const parseChangedFiles = (out: string) => out.split("\0").filter(Boolean).map((entry) => entry.slice(3));
 
 /** Paths (forward slashes, relative to the repo root) with uncommitted changes, including untracked files. */
-export async function changedFiles(cwd: string): Promise<string[]> {
+export async function changedFiles(cwd: string) {
   const r = await git(cwd, changedFileArgs);
-  return r.ok ? parseChangedFiles(r.out) : [];
+  if (r.ok) return { paths: parseChangedFiles(r.out) };
+  if (r.out.startsWith("fatal: not a git repository")) return { paths: [] };
+  return { paths: [], error: "git status 失败：" + r.out };
 }
 
 /** Capture the task's baseline before publishing a new assignment. */
@@ -54,10 +56,14 @@ export function globMatch(glob: string, file: string): boolean {
     .replace(/\\/g, "/")
     .replace(/^\.\//, "")
     .replace(/[.+^${}()|[\]]/g, "\\$&")
-    .replace(/\*\*\/?/g, "\u0000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\u0000/g, ".*");
+    .replace(/\*\*\/|\*\*|\*|\?/g, (wildcard) => {
+      switch (wildcard) {
+        case "**/": return "(?:[^/]+/)*";
+        case "**": return ".*";
+        case "*": return "[^/]*";
+        default: return "[^/]";
+      }
+    });
   return new RegExp(`^${re}$`, "i").test(file);
 }
 
@@ -87,6 +93,7 @@ export async function commitAll(cwd: string, subject: string, body: string, opts
   const add = await git(cwd, ["add", "-A"]);
   if (!add.ok) return { error: "git add 失败：" + add.out };
   const staged = await git(cwd, ["diff", "--cached", "--quiet"]);
+  if (!staged.ok && staged.code !== 1) return { error: "git diff 失败：" + staged.out };
   if (staged.ok && !opts.allowEmpty) return { skipped: "没有文件改动" };
   const c = await git(cwd, ["commit", ...(staged.ok ? ["--allow-empty"] : []), "-m", subject, "-m", body]);
   if (!c.ok) return { error: "git commit 失败：" + c.out };
@@ -105,8 +112,13 @@ export async function commitPaths(cwd: string, paths: string[], subject: string,
   } else {
     const add = await git(cwd, ["add", "-A", "--", ...paths]);
     if (!add.ok) return { error: "git add 失败：" + add.out };
+    if (!opts.allowEmpty) {
+      const staged = await git(cwd, ["diff", "--cached", "--quiet", "--", ...paths]);
+      if (staged.ok) return { skipped: "本任务范围内没有文件改动" };
+      if (staged.code !== 1) return { error: "git diff 失败：" + staged.out };
+    }
     const c = await git(cwd, ["commit", "--only", ...(opts.allowEmpty ? ["--allow-empty"] : []), "-m", subject, "-m", body, "--", ...paths]);
-    if (!c.ok) return /nothing to commit|no changes added/i.test(c.out) ? { skipped: "本任务范围内没有文件改动" } : { error: "git commit 失败：" + c.out };
+    if (!c.ok) return { error: "git commit 失败：" + c.out };
   }
   const sha = await git(cwd, ["rev-parse", "HEAD"]);
   return sha.ok ? { sha: sha.out } : { error: sha.out };
